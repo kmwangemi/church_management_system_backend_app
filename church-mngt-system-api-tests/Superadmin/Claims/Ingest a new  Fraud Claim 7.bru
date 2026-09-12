@@ -1,0 +1,80 @@
+meta {
+  name: Ingest a new  Fraud Claim 7
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{prod_url_heroku}}/claims
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "claim": {
+      "sha_claim_id": "SHA-TEST-PHANTOM-001",
+      "claim_type": "OUTPATIENT",
+      "sha_status": "SUBMITTED",
+      "admission_date": "2026-03-01T00:00:00+00:00",
+      "discharge_date": "2026-03-01T00:00:00+00:00",
+      "diagnosis_codes": ["J06.9"],
+      "total_claim_amount": 3000.00,
+      "approved_amount": null,
+      "submitted_at": "2026-03-01T10:00:00+00:00",
+      "raw_payload": {
+        "fhir_bundle_id": "bundle-sha-test-tc001",
+        "encounter_type": "AMB",
+        "practitioner_id": "PRAC-KE-00101",
+        "practitioner_name": "Dr. James Mwangi",
+        "eligibility_checked": false,
+        "preauth_id": null,
+        "source_system": "CLINIC-HIS-v2.0",
+        "coverage_period": {
+          "start": "2026-01-01",
+          "end": "2026-12-31"
+        }
+      }
+    },
+    "provider": {
+      "sha_provider_code": "FAC-NBI-00342",
+      "name": "Kenyatta National Hospital",
+      "county": "Nairobi",
+      "facility_type": "PUBLIC_HOSPITAL",
+      "facility_level": "LEVEL_4",
+      "accreditation_status": "ACTIVE",
+      "bed_capacity": 1800,
+      "phone": "+254-020-2726300",
+      "email": "info@knh.or.ke"
+    },
+    "member": {
+      "sha_member_id": "SHA-KE-GHOST-99999999",
+      "national_id": null,
+      "gender": "MALE",
+      "date_of_birth": "1990-01-01",
+      "county": "Nairobi",
+      "coverage_status": "ACTIVE",
+      "scheme": "SHIF"
+    },
+    "services": [
+      {
+        "service_code": "CONSULT-GP-001",
+        "description": "General Practitioner Consultation — Routine outpatient assessment and clinical examination for upper respiratory tract infection",
+        "quantity": 1,
+        "unit_price": 1500.00,
+        "total_price": 1500.00
+      },
+      {
+        "service_code": "LAB-FBC-001",
+        "description": "Full Blood Count — Complete haematology panel including WBC, RBC, haemoglobin, haematocrit, and platelets",
+        "quantity": 1,
+        "unit_price": 1500.00,
+        "total_price": 1500.00
+      }
+    ]
+  }
+}

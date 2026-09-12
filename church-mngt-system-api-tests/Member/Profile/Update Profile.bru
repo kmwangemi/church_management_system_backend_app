@@ -1,0 +1,35 @@
+meta {
+  name: Update Profile
+  type: http
+  seq: 2
+}
+
+patch {
+  url: {{local_url}}/employer/profile
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "first_name": "john updated",
+    "last_name": "doe updated",
+    "phone_number": "+2540712345011",
+    "profile_picture_url": null,
+    "company_name": "pelvin tech ltd",
+    "industry": "agriculture",
+    "company_description": "this is a technology based company",
+    "company_size": "1-10 employees",
+    "location": "nairobi, kenya",
+    "website": "https://www.pelvintech.com"
+  }
+}
+
+body:multipart-form {
+  username: mwangemik@gmail.com
+  password: Test@123
+}

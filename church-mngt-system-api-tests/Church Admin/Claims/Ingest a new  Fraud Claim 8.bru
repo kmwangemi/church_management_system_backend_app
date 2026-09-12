@@ -1,0 +1,80 @@
+meta {
+  name: Ingest a new  Fraud Claim 8
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{prod_url_heroku}}/claims
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "claim": {
+      "sha_claim_id": "SHA-TEST-PHANTOM-002",
+      "claim_type": "OUTPATIENT",
+      "sha_status": "SUBMITTED",
+      "admission_date": "2026-03-02T00:00:00+00:00",
+      "discharge_date": "2026-03-02T00:00:00+00:00",
+      "diagnosis_codes": ["J06.9", "R50.9"],
+      "total_claim_amount": 2500.00,
+      "approved_amount": null,
+      "submitted_at": "2026-03-02T11:30:00+00:00",
+      "raw_payload": {
+        "fhir_bundle_id": "bundle-sha-test-tc002",
+        "encounter_type": "AMB",
+        "practitioner_id": "PRAC-KE-00102",
+        "practitioner_name": "Dr. Faith Njeri",
+        "eligibility_checked": true,
+        "preauth_id": null,
+        "source_system": "CLINIC-HIS-v2.0",
+        "coverage_period": {
+          "start": "2026-01-01",
+          "end": "2026-12-31"
+        }
+      }
+    },
+    "provider": {
+      "sha_provider_code": "FAC-NBI-00342",
+      "name": "Kenyatta National Hospital",
+      "county": "Nairobi",
+      "facility_type": "PUBLIC_HOSPITAL",
+      "facility_level": "LEVEL_4",
+      "accreditation_status": "ACTIVE",
+      "bed_capacity": 1800,
+      "phone": "+254-020-2726300",
+      "email": "info@knh.or.ke"
+    },
+    "member": {
+      "sha_member_id": "SHA-KE-20240001234",
+      "national_id": null,
+      "gender": "FEMALE",
+      "date_of_birth": "1985-04-20",
+      "county": "Nairobi",
+      "coverage_status": "SUSPENDED",
+      "scheme": "SHIF"
+    },
+    "services": [
+      {
+        "service_code": "CONSULT-GP-001",
+        "description": "General Practitioner Consultation — Outpatient assessment for fever and upper respiratory symptoms",
+        "quantity": 1,
+        "unit_price": 1500.00,
+        "total_price": 1500.00
+      },
+      {
+        "service_code": "LAB-RBS-001",
+        "description": "Random Blood Sugar — Point-of-care glucose test for diabetes monitoring and management",
+        "quantity": 1,
+        "unit_price": 1000.00,
+        "total_price": 1000.00
+      }
+    ]
+  }
+}

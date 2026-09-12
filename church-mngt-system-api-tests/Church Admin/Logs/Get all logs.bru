@@ -1,0 +1,19 @@
+meta {
+  name: Get all logs
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{local_url}}/logs
+  body: none
+  auth: bearer
+}
+
+params:query {
+  ~page: 1
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

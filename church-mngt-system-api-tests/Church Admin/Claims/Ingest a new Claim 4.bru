@@ -1,0 +1,136 @@
+meta {
+  name: Ingest a new Claim 4
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{prod_url_heroku}}/claims
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "claim": {
+      "sha_claim_id": "SHA-CLM-2026-00094733",
+      "claim_type": "MATERNITY",
+      "sha_status": "SUBMITTED",
+      "admission_date": "2026-02-05T00:00:00+00:00",
+      "discharge_date": "2026-02-08T00:00:00+00:00",
+      "diagnosis_codes": ["O80", "Z37.0", "O26.0"],
+      "total_claim_amount": 28500.00,
+      "approved_amount": null,
+      "submitted_at": "2026-02-08T09:15:00+00:00",
+      "raw_payload": {
+        "fhir_bundle_id": "bundle-sha-test-004",
+        "encounter_type": "IMP",
+        "practitioner_id": "PRAC-KE-00812",
+        "practitioner_name": "Dr. Fatuma Hassan",
+        "eligibility_checked": true,
+        "preauth_id": "PREAUTH-CDH-2026-00789",
+        "source_system": "CDH-HMIS-v2.1",
+        "coverage_period": {
+          "start": "2026-01-01",
+          "end": "2026-12-31"
+        }
+      }
+    },
+    "provider": {
+      "sha_provider_code": "FAC-MSA-00561",
+      "name": "Coast General Teaching & Referral Hospital",
+      "county": "Mombasa",
+      "facility_type": "PUBLIC_HOSPITAL",
+      "facility_level": "LEVEL_5",
+      "accreditation_status": "ACTIVE",
+      "bed_capacity": 400,
+      "phone": "+254-041-2314201",
+      "email": "info@coastgeneral.go.ke"
+    },
+    "member": {
+      "sha_member_id": "SHA-KE-20240011345",
+      "national_id": "38765432",
+      "gender": "FEMALE",
+      "date_of_birth": "1998-11-25",
+      "county": "Mombasa",
+      "coverage_status": "ACTIVE",
+      "scheme": "SHIF"
+    },
+    "services": [
+      {
+        "service_code": "MATERNITY-NVD-001",
+        "description": "Normal Vaginal Delivery — Assisted spontaneous vaginal delivery with episiotomy",
+        "quantity": 1,
+        "unit_price": 8000.00,
+        "total_price": 8000.00
+      },
+      {
+        "service_code": "MATERNITY-ANC-001",
+        "description": "Antenatal Care Review — Final antenatal assessment on admission including foetal monitoring",
+        "quantity": 1,
+        "unit_price": 2000.00,
+        "total_price": 2000.00
+      },
+      {
+        "service_code": "LAB-FBC-001",
+        "description": "Full Blood Count — Pre-delivery haematology panel",
+        "quantity": 1,
+        "unit_price": 1200.00,
+        "total_price": 1200.00
+      },
+      {
+        "service_code": "LAB-BLOOD-GROUP",
+        "description": "Blood Group & Crossmatch — ABO/Rh typing and crossmatch pre-delivery",
+        "quantity": 1,
+        "unit_price": 800.00,
+        "total_price": 800.00
+      },
+      {
+        "service_code": "WARD-MATERNITY-DAY",
+        "description": "Maternity Ward Bed (per day) — Post-natal bed occupancy with mother and newborn monitoring",
+        "quantity": 3,
+        "unit_price": 2500.00,
+        "total_price": 7500.00
+      },
+      {
+        "service_code": "DRUG-OXYTOCIN-001",
+        "description": "Oxytocin 10IU — Uterotonic for active management of third stage of labour",
+        "quantity": 2,
+        "unit_price": 150.00,
+        "total_price": 300.00
+      },
+      {
+        "service_code": "PROC-NEWBORN-CARE",
+        "description": "Immediate Newborn Care — Resuscitation readiness, cord clamping, APGAR scoring and vitamin K administration",
+        "quantity": 1,
+        "unit_price": 3500.00,
+        "total_price": 3500.00
+      },
+      {
+        "service_code": "NURS-CARE-DAY",
+        "description": "Nursing Care (per day) — Post-natal nursing including breastfeeding support and wound care",
+        "quantity": 3,
+        "unit_price": 400.00,
+        "total_price": 1200.00
+      },
+      {
+        "service_code": "DRUG-FERROUS-200",
+        "description": "Ferrous Sulphate 200mg — Iron supplementation post-delivery for anaemia prevention",
+        "quantity": 30,
+        "unit_price": 10.00,
+        "total_price": 300.00
+      },
+      {
+        "service_code": "PROC-IMMUNISATION-001",
+        "description": "Newborn Immunisation — BCG and OPV-0 vaccines administered at birth",
+        "quantity": 1,
+        "unit_price": 1700.00,
+        "total_price": 1700.00
+      }
+    ]
+  }
+}

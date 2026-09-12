@@ -1,0 +1,20 @@
+meta {
+  name: Get all expenses
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{local_url}}/expenses?page=1&page_size=10
+  body: none
+  auth: bearer
+}
+
+params:query {
+  page: 1
+  page_size: 10
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

@@ -1,0 +1,122 @@
+meta {
+  name: Ingest a new Claim 3
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{prod_url_heroku}}/claims
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "claim": {
+      "sha_claim_id": "SHA-CLM-2026-00092450",
+      "claim_type": "INPATIENT",
+      "sha_status": "SUBMITTED",
+      "admission_date": "2026-01-15T00:00:00+00:00",
+      "discharge_date": "2026-01-22T00:00:00+00:00",
+      "diagnosis_codes": ["A01.0", "R50.9", "E86.0"],
+      "total_claim_amount": 31200.00,
+      "approved_amount": null,
+      "submitted_at": "2026-01-22T10:00:00+00:00",
+      "raw_payload": {
+        "fhir_bundle_id": "bundle-sha-test-003",
+        "encounter_type": "IMP",
+        "practitioner_id": "PRAC-KE-00678",
+        "practitioner_name": "Dr. George Onyango",
+        "eligibility_checked": true,
+        "preauth_id": "PREAUTH-JGH-2026-00456",
+        "source_system": "JGH-HMIS-v1.9",
+        "coverage_period": {
+          "start": "2026-01-01",
+          "end": "2026-12-31"
+        }
+      }
+    },
+    "provider": {
+      "sha_provider_code": "FAC-KSM-00234",
+      "name": "Jaramogi Oginga Odinga Teaching & Referral Hospital",
+      "county": "Kisumu",
+      "facility_type": "PUBLIC_HOSPITAL",
+      "facility_level": "LEVEL_6",
+      "accreditation_status": "ACTIVE",
+      "bed_capacity": 600,
+      "phone": "+254-057-2020233",
+      "email": "info@jootrh.go.ke"
+    },
+    "member": {
+      "sha_member_id": "SHA-KE-20240008821",
+      "national_id": "41234567",
+      "gender": "FEMALE",
+      "date_of_birth": "2005-09-10",
+      "county": "Kisumu",
+      "coverage_status": "ACTIVE",
+      "scheme": "SHIF"
+    },
+    "services": [
+      {
+        "service_code": "CONSULT-SPEC-001",
+        "description": "Specialist Consultation — Infectious disease specialist review for typhoid fever management",
+        "quantity": 1,
+        "unit_price": 3500.00,
+        "total_price": 3500.00
+      },
+      {
+        "service_code": "LAB-WIDAL-001",
+        "description": "Widal Test — Serological test for Salmonella typhi antibodies",
+        "quantity": 1,
+        "unit_price": 900.00,
+        "total_price": 900.00
+      },
+      {
+        "service_code": "LAB-BC-001",
+        "description": "Blood Culture & Sensitivity — Microbiological culture to confirm typhoid and guide antibiotic therapy",
+        "quantity": 1,
+        "unit_price": 2800.00,
+        "total_price": 2800.00
+      },
+      {
+        "service_code": "WARD-GEN-DAY",
+        "description": "General Ward Bed (per day) — Standard inpatient bed occupancy including meals and basic monitoring",
+        "quantity": 7,
+        "unit_price": 2000.00,
+        "total_price": 14000.00
+      },
+      {
+        "service_code": "DRUG-CIPRO-500",
+        "description": "Ciprofloxacin 500mg — Fluoroquinolone antibiotic for typhoid fever treatment",
+        "quantity": 14,
+        "unit_price": 35.00,
+        "total_price": 490.00
+      },
+      {
+        "service_code": "PROC-IV-FLUID-001",
+        "description": "IV Fluid Administration — Normal saline infusion for dehydration (E86.0) correction",
+        "quantity": 7,
+        "unit_price": 650.00,
+        "total_price": 4550.00
+      },
+      {
+        "service_code": "NURS-CARE-DAY",
+        "description": "Nursing Care (per day) — Daily skilled nursing including IV monitoring, vitals and medication administration",
+        "quantity": 7,
+        "unit_price": 500.00,
+        "total_price": 3500.00
+      },
+      {
+        "service_code": "PROC-XRAY-CHEST",
+        "description": "Chest X-Ray — Radiological investigation to rule out pulmonary complications",
+        "quantity": 1,
+        "unit_price": 1460.00,
+        "total_price": 1460.00
+      }
+    ]
+  }
+}

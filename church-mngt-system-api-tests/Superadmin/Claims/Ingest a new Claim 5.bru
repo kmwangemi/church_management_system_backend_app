@@ -1,0 +1,143 @@
+meta {
+  name: Ingest a new Claim 5
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{prod_url_heroku}}/claims
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "claim": {
+      "sha_claim_id": "SHA-CLM-2026-00096188",
+      "claim_type": "INPATIENT",
+      "sha_status": "SUBMITTED",
+      "admission_date": "2026-02-12T00:00:00+00:00",
+      "discharge_date": "2026-02-19T00:00:00+00:00",
+      "diagnosis_codes": ["K40.9", "K40.3", "R10.4"],
+      "total_claim_amount": 67450.00,
+      "approved_amount": null,
+      "submitted_at": "2026-02-19T11:30:00+00:00",
+      "raw_payload": {
+        "fhir_bundle_id": "bundle-sha-test-005",
+        "encounter_type": "IMP",
+        "practitioner_id": "PRAC-KE-00334",
+        "practitioner_name": "Dr. Samuel Kipchoge",
+        "eligibility_checked": true,
+        "preauth_id": "PREAUTH-NKR-2026-00321",
+        "source_system": "NKR-HMIS-v3.0",
+        "coverage_period": {
+          "start": "2026-01-01",
+          "end": "2026-12-31"
+        }
+      }
+    },
+    "provider": {
+      "sha_provider_code": "FAC-NKR-00412",
+      "name": "Nakuru Level 5 Hospital",
+      "county": "Nakuru",
+      "facility_type": "PUBLIC_HOSPITAL",
+      "facility_level": "LEVEL_5",
+      "accreditation_status": "ACTIVE",
+      "bed_capacity": 350,
+      "phone": "+254-051-2212640",
+      "email": "info@nakuruhospital.go.ke"
+    },
+    "member": {
+      "sha_member_id": "SHA-KE-20240019876",
+      "national_id": "22345678",
+      "gender": "MALE",
+      "date_of_birth": "1975-06-18",
+      "county": "Nakuru",
+      "coverage_status": "ACTIVE",
+      "scheme": "SHIF"
+    },
+    "services": [
+      {
+        "service_code": "CONSULT-SURG-001",
+        "description": "Surgical Consultation — Pre-operative assessment for inguinal hernia repair",
+        "quantity": 1,
+        "unit_price": 4000.00,
+        "total_price": 4000.00
+      },
+      {
+        "service_code": "PROC-HERNIA-REPAIR",
+        "description": "Inguinal Hernia Repair (Mesh) — Open Lichtenstein tension-free mesh hernioplasty under spinal anaesthesia",
+        "quantity": 1,
+        "unit_price": 25000.00,
+        "total_price": 25000.00
+      },
+      {
+        "service_code": "PROC-ANAESTHESIA-001",
+        "description": "Spinal Anaesthesia — Administration and monitoring of spinal block for surgical procedure",
+        "quantity": 1,
+        "unit_price": 8000.00,
+        "total_price": 8000.00
+      },
+      {
+        "service_code": "PROC-THEATRE-001",
+        "description": "Operating Theatre — Theatre time, sterile supplies, surgical instrument use and scrub team",
+        "quantity": 1,
+        "unit_price": 7500.00,
+        "total_price": 7500.00
+      },
+      {
+        "service_code": "LAB-FBC-001",
+        "description": "Full Blood Count — Pre-operative haematology screen",
+        "quantity": 1,
+        "unit_price": 1200.00,
+        "total_price": 1200.00
+      },
+      {
+        "service_code": "LAB-RFT-001",
+        "description": "Renal Function Tests — Pre-operative urea, creatinine and electrolytes",
+        "quantity": 1,
+        "unit_price": 1500.00,
+        "total_price": 1500.00
+      },
+      {
+        "service_code": "PROC-XRAY-CHEST",
+        "description": "Chest X-Ray — Pre-operative cardiopulmonary clearance",
+        "quantity": 1,
+        "unit_price": 1460.00,
+        "total_price": 1460.00
+      },
+      {
+        "service_code": "WARD-GEN-DAY",
+        "description": "General Ward Bed (per day) — Post-operative inpatient bed including meals and monitoring",
+        "quantity": 7,
+        "unit_price": 2000.00,
+        "total_price": 14000.00
+      },
+      {
+        "service_code": "DRUG-DICLOF-75",
+        "description": "Diclofenac 75mg IM — NSAID for post-operative pain management",
+        "quantity": 6,
+        "unit_price": 80.00,
+        "total_price": 480.00
+      },
+      {
+        "service_code": "DRUG-CEFTRIAX-1G",
+        "description": "Ceftriaxone 1g IV — Prophylactic cephalosporin antibiotic perioperative",
+        "quantity": 3,
+        "unit_price": 270.00,
+        "total_price": 810.00
+      },
+      {
+        "service_code": "NURS-CARE-DAY",
+        "description": "Nursing Care (per day) — Post-operative nursing including wound care, drain management and early mobilisation",
+        "quantity": 7,
+        "unit_price": 500.00,
+        "total_price": 3500.00
+      }
+    ]
+  }
+}

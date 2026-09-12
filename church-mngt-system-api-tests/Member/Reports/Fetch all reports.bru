@@ -1,0 +1,19 @@
+meta {
+  name: Fetch all reports
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{local_url}}/reports
+  body: none
+  auth: bearer
+}
+
+params:query {
+  ~page: 1
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

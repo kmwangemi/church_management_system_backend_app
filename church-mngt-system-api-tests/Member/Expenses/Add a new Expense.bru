@@ -1,0 +1,25 @@
+meta {
+  name: Add a new Expense
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{local_url}}/expenses
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  
+  {
+    "amount": 150,
+    "category": "shopping",
+    "date": "2026-04-21T21:25:27.268Z",
+    "notes": "House shopping"
+  }
+}

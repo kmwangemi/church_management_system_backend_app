@@ -1,0 +1,26 @@
+meta {
+  name: Registration
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{local_url}}/registration
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "email": "mwas@gmail.com",
+    "full_name": "kelvin mwas",
+    "phone": "+254706612436",
+    "password": "user@123",
+    "role_ids": ["eb7029fd-44f3-4cfe-af12-7ace1e0e34b6"],
+    "is_superuser": false
+  }
+}

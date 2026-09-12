@@ -1,0 +1,22 @@
+meta {
+  name: List Sessions
+  type: http
+  seq: 9
+}
+
+get {
+  url: {{local_url}}/auth/sessions
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "username": "dev@codeanza.com",
+    "password": "Dev@2030"
+  }
+}

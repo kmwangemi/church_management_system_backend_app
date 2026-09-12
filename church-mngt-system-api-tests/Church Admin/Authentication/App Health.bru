@@ -1,0 +1,18 @@
+meta {
+  name: App Health
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{local_url}}/health
+  body: none
+  auth: none
+}
+
+body:json {
+  {
+    "username": "dev@codeanza.com",
+    "password": "Dev@2030"
+  }
+}

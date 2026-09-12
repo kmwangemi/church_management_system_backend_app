@@ -1,0 +1,108 @@
+meta {
+  name: Ingest a new Claim 2 - Low Risk
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{prod_url_heroku}}/claims
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "claim": {
+      "sha_claim_id": "SHA-CLM-2026-00091001",
+      "claim_type": "OUTPATIENT",
+      "sha_status": "SUBMITTED",
+      "admission_date": "2026-01-10T00:00:00+00:00",
+      "discharge_date": "2026-01-10T00:00:00+00:00",
+      "diagnosis_codes": ["K29.7", "R10.4"],
+      "total_claim_amount": 4850.00,
+      "approved_amount": null,
+      "submitted_at": "2026-01-10T14:30:00+00:00",
+      "raw_payload": {
+        "fhir_bundle_id": "bundle-sha-test-002",
+        "encounter_type": "AMB",
+        "practitioner_id": "PRAC-KE-00455",
+        "practitioner_name": "Dr. Amina Odhiambo",
+        "eligibility_checked": true,
+        "preauth_id": null,
+        "source_system": "GERTRUDES-HMIS-v2.4",
+        "coverage_period": {
+          "start": "2026-01-01",
+          "end": "2026-12-31"
+        }
+      }
+    },
+    "provider": {
+      "sha_provider_code": "FAC-NBI-00789",
+      "name": "Gertrude's Children's Hospital",
+      "county": "Nairobi",
+      "facility_type": "PRIVATE_HOSPITAL",
+      "facility_level": "LEVEL_4",
+      "accreditation_status": "ACTIVE",
+      "bed_capacity": 120,
+      "phone": "+254-020-7206000",
+      "email": "info@gertrudes.or.ke"
+    },
+    "member": {
+      "sha_member_id": "SHA-KE-20240005567",
+      "national_id": "29876543",
+      "gender": "MALE",
+      "date_of_birth": "1990-03-22",
+      "county": "Nairobi",
+      "coverage_status": "ACTIVE",
+      "scheme": "SHIF"
+    },
+    "services": [
+      {
+        "service_code": "CONSULT-GP-001",
+        "description": "General Practitioner Consultation — Outpatient review for gastric pain and abdominal discomfort",
+        "quantity": 1,
+        "unit_price": 1500.00,
+        "total_price": 1500.00
+      },
+      {
+        "service_code": "LAB-H-PYLORI-001",
+        "description": "H. Pylori Rapid Test — Stool antigen test for Helicobacter pylori detection",
+        "quantity": 1,
+        "unit_price": 1800.00,
+        "total_price": 1800.00
+      },
+      {
+        "service_code": "DRUG-OMEP-20",
+        "description": "Omeprazole 20mg — Proton pump inhibitor for gastric acid suppression",
+        "quantity": 14,
+        "unit_price": 25.00,
+        "total_price": 350.00
+      },
+      {
+        "service_code": "DRUG-METRO-400",
+        "description": "Metronidazole 400mg — Antibiotic for H. pylori eradication therapy",
+        "quantity": 14,
+        "unit_price": 15.00,
+        "total_price": 210.00
+      },
+      {
+        "service_code": "DRUG-AMOX-500",
+        "description": "Amoxicillin 500mg — Antibiotic component of H. pylori triple therapy",
+        "quantity": 14,
+        "unit_price": 25.00,
+        "total_price": 350.00
+      },
+      {
+        "service_code": "PROC-COUNSEL-001",
+        "description": "Patient Counselling — Dietary and lifestyle advice for gastric ulcer management",
+        "quantity": 1,
+        "unit_price": 640.00,
+        "total_price": 640.00
+      }
+    ]
+  }
+}

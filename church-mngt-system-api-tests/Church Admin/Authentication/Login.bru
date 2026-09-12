@@ -1,0 +1,62 @@
+meta {
+  name: Login
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{prod_url_heroku}}/auth/login
+  body: multipartForm
+  auth: none
+}
+
+body:json {
+  {
+    "username": "dev@codeanza.com",
+    "password": "Dev@2030"
+  }
+}
+
+body:multipart-form {
+  username: admin@afyaguard.go.ke
+  password: AfyaGuard@2026!
+}
+
+tests {
+  test("should be able to login", function () {
+    const data = res.getBody();
+    console.log('Login response:', data);
+    expect(res.getStatus()).to.equal(200);
+    // ✅ Access token is nested under data.tokens
+    if (data && data.tokens && data.tokens.access_token) {
+      bru.setEnvVar('auth_token', data.tokens.access_token);
+      bru.setEnvVar('refresh_token', data.tokens.refresh_token);
+      console.log("Auth token saved to environment");
+      console.log("Refresh token saved to environment");
+    } else {
+      console.error("No access_token found in response");
+    }
+  });
+  
+  test("should return correct structure", function () {
+    const data = res.getBody();
+    // ✅ Top level structure
+    expect(data).to.have.property("tokens");
+    expect(data).to.have.property("user");
+    // ✅ Tokens structure
+    expect(data.tokens).to.have.property("access_token");
+    expect(data.tokens).to.have.property("refresh_token");
+    expect(data.tokens).to.have.property("token_type");
+    expect(data.tokens).to.have.property("expires_in");
+    expect(data.tokens.token_type).to.equal("bearer");
+    // ✅ User structure
+    expect(data.user).to.have.property("id");
+    expect(data.user).to.have.property("email");
+    expect(data.user).to.have.property("full_name");
+    expect(data.user).to.have.property("roles");
+    expect(data.user).to.have.property("is_superuser");
+    expect(data.user).to.have.property("must_change_password");
+    expect(data.user.roles).to.be.an("array");
+    expect(data.user.is_superuser).to.equal(true);
+  });
+}

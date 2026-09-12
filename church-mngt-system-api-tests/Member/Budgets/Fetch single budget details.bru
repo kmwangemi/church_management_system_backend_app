@@ -1,0 +1,15 @@
+meta {
+  name: Fetch single budget details
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{local_url}}/budgets/ecda5c3c-9be4-4593-a6a2-d1847944b8b8
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

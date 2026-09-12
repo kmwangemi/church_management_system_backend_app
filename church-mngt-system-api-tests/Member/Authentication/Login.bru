@@ -1,0 +1,61 @@
+meta {
+  name: Login
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{local_url}}/auth/login
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "email": "mwangemik@gmail.com",
+    "password": "Elma@123!"
+  }
+}
+
+body:multipart-form {
+  username: mwas@gmail.com
+  password: user@123
+}
+
+tests {
+  test("should be able to login", function () {
+    const data = res.getBody();
+    console.log('Data:', data);
+    expect(res.getStatus()).to.equal(200);
+    // ✅ Access token
+    if (data && data.access_token) {
+      bru.setEnvVar('auth_token', data.access_token);
+      bru.setEnvVar('refresh_token', data.refresh_token);
+      console.log("Auth token saved to environment");
+      console.log("Refresh token saved to environment");
+    } else {
+      console.error("No access_token found in response");
+    }
+  });
+  
+  test("should return correct structure", function () {
+    const data = res.getBody();
+    // ✅ Top level structure
+    expect(data).to.have.property("access_token");
+    expect(data).to.have.property("user");
+    // ✅ Tokens structure
+    expect(data).to.have.property("access_token");
+    expect(data).to.have.property("refresh_token");
+    expect(data).to.have.property("token_type");
+    expect(data.token_type).to.equal("bearer");
+    // ✅ User structure
+    expect(data.user).to.have.property("id");
+    expect(data.user).to.have.property("email");
+    expect(data.user).to.have.property("first_name");
+    expect(data.user).to.have.property("last_name");
+    expect(data.user).to.have.property("phone_number");
+    expect(data.user).to.have.property("is_email_verified");
+    expect(data.user).to.have.property("is_active");
+    expect(data.user.is_active).to.equal(true);
+  });
+}

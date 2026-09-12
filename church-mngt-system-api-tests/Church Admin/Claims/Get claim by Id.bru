@@ -1,0 +1,15 @@
+meta {
+  name: Get claim by Id
+  type: http
+  seq: 10
+}
+
+get {
+  url: {{local_url}}/claims/4559341b-50a7-418a-973a-b4f8e36fc61f
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

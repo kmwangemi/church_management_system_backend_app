@@ -1,0 +1,20 @@
+meta {
+  name: Get all claims
+  type: http
+  seq: 9
+}
+
+get {
+  url: {{prod_url_heroku}}/claims?page=1&page_size=10
+  body: none
+  auth: bearer
+}
+
+params:query {
+  page: 1
+  page_size: 10
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

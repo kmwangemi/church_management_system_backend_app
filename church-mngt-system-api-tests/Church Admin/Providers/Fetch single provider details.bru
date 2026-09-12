@@ -1,0 +1,15 @@
+meta {
+  name: Fetch single provider details
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{local_url}}/providers/0e22cbee-e597-4402-9eb2-e1881bf7374b
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

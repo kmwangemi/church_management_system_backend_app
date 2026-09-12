@@ -1,0 +1,22 @@
+meta {
+  name: List Devices
+  type: http
+  seq: 10
+}
+
+get {
+  url: {{local_url}}/auth/devices
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "username": "dev@codeanza.com",
+    "password": "Dev@2030"
+  }
+}

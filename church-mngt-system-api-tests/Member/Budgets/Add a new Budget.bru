@@ -1,0 +1,23 @@
+meta {
+  name: Add a new Budget
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{local_url}}/budgets
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  
+  {
+    "category": "shopping",
+    "limit_amount": 5000
+  }
+}

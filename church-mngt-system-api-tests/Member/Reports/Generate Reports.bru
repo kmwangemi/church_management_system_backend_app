@@ -1,0 +1,15 @@
+meta {
+  name: Generate Reports
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{local_url}}/alerts/bcda45ce-7750-44bb-96a3-284fbbfe67c9
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
