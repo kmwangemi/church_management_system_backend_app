@@ -1,20 +1,25 @@
 import sys
-from loguru import logger
+
 from app.core.config import settings
+from loguru import logger
+
 
 def setup_logging():
+    is_dev = settings.ENVIRONMENT == "DEVELOPMENT"
     # Remove default handler
     logger.remove()
     # Add console handler
     logger.add(
         sys.stderr,
         format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        level="DEBUG" if settings.ENVIRONMENT == "DEVELOPMENT" else "INFO",
+        level="DEBUG" if is_dev else "INFO",
         enqueue=True,
         backtrace=True,
-        diagnose=True,
+        # diagnose prints variable VALUES in tracebacks (passwords, tokens, member data).
+        # Development only.
+        diagnose=is_dev,
     )
-    # Add file handler for errors
+    # Add file handler for errors (persisted on disk, so never include variable values)
     logger.add(
         "logs/error.log",
         rotation="10 MB",
@@ -22,6 +27,6 @@ def setup_logging():
         level="ERROR",
         enqueue=True,
         backtrace=True,
-        diagnose=True,
+        diagnose=False,
     )
-    logger.info("Structured logging initialized")
+    logger.info("Logging initialized")

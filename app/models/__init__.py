@@ -1,19 +1,37 @@
 from app.models.audit import AuditLog
-from app.models.auth import Permission, Role, UserRole, role_permission
-from app.models.church import Church, Branch
+from app.models.auth import (
+    Account,
+    Invitation,
+    MemberRoleAssignment,
+    Permission,
+    Role,
+    Verification,
+    role_permission,
+)
+from app.models.church import Branch, Church
 from app.models.detail import (
+    Address,
+    AdminDetails,
+    AvailabilitySchedule,
+    BackgroundCheck,
+    BishopDetails,
+    EmergencyContact,
     MemberDetails,
+    PastorAssignment,
     PastorDetails,
     StaffDetails,
+    VisitorDetails,
+    VolunteerAssignment,
     VolunteerDetails,
+    VolunteerRole,
 )
 from app.models.event import Activity, Attendance, Event
-from app.models.finance import Expense, Offering, Pledge
+from app.models.finance import Expense, Fund, Offering, Pledge, RecurringGift
 from app.models.group import Department, DepartmentMember, Group, GroupMember
-from app.models.member import Member, BranchMember
+from app.models.member import Guardian, Household, Member
 from app.models.operation import Announcement, Asset, MaintenanceRecord, PrayerRequest
-from app.models.subscription import ChurchSubscription, UserSubscription
-from app.models.user import User
+from app.models.subscription import ChurchSubscription, Plan, UserSubscription
+from app.models.user import User, UserSession
 
 # This file is used to import all models so that Alembic can detect them.
 
@@ -21,12 +39,15 @@ from app.enums import (  # noqa: F401
     Gender,
     MaritalStatus,
     AccountStatus,
-    GlobalRole,
+    PlatformRole,
     ChurchRole,
+    MemberType,
+    HouseholdRole,
     MembershipStatus,
     PastorAssignmentStatus,
     EmploymentType,
     VolunteerStatus,
+    AssignmentStatus,
     ClearanceLevel,
     AdminAccessLevel,
     HowDidYouHear,
@@ -45,9 +66,11 @@ from app.enums import (  # noqa: F401
     PledgePurpose,
     PaymentSchedule,
     PledgeStatus,
+    GiftStatus,
     PrayerCategory,
     Priority,
     PrayerStatus,
+    PrayerVisibility,
     DayOfWeek,
     ServiceType,
     AssetStatus,
@@ -66,6 +89,7 @@ from app.enums import (  # noqa: F401
     TemplateCategory,
     ScheduleType,
     ChurchPlan,
+    BillingInterval,
     MaintenanceSchedule,
     AssetCondition,
     AssetType,
@@ -88,49 +112,78 @@ from app.enums import (  # noqa: F401
 )
 
 __all__ = [
-    # Models
+    # Identity & access
     "User",
+    "UserSession",
+    "Account",
+    "Verification",
     "Role",
     "Permission",
-    "UserRole",
+    "MemberRoleAssignment",
+    "Invitation",
     # Association tables
     "role_permission",
-    # Others
+    # Church structure
     "Church",
     "Branch",
+    "Address",
+    # People
     "Member",
-    "BranchMember",
+    "Household",
+    "Guardian",
+    "EmergencyContact",
+    "MemberDetails",
+    "VisitorDetails",
+    "BishopDetails",
+    "PastorDetails",
+    "PastorAssignment",
+    "StaffDetails",
+    "AdminDetails",
+    # Volunteers
+    "VolunteerDetails",
+    "VolunteerRole",
+    "VolunteerAssignment",
+    "AvailabilitySchedule",
+    "BackgroundCheck",
+    # Ministry
     "Department",
     "DepartmentMember",
     "Group",
     "GroupMember",
+    # Events
     "Event",
     "Activity",
     "Attendance",
+    # Finance
+    "Fund",
     "Offering",
     "Pledge",
+    "RecurringGift",
     "Expense",
+    # Operations
     "Asset",
     "MaintenanceRecord",
     "Announcement",
     "PrayerRequest",
+    # Subscriptions
+    "Plan",
     "ChurchSubscription",
     "UserSubscription",
-    "MemberDetails",
-    "PastorDetails",
-    "StaffDetails",
-    "VolunteerDetails",
+    # Audit
     "AuditLog",
     # Enums
     "Gender",
     "MaritalStatus",
     "AccountStatus",
-    "GlobalRole",
+    "PlatformRole",
     "ChurchRole",
+    "MemberType",
+    "HouseholdRole",
     "MembershipStatus",
     "PastorAssignmentStatus",
     "EmploymentType",
     "VolunteerStatus",
+    "AssignmentStatus",
     "ClearanceLevel",
     "AdminAccessLevel",
     "HowDidYouHear",
@@ -149,9 +202,11 @@ __all__ = [
     "PledgePurpose",
     "PaymentSchedule",
     "PledgeStatus",
+    "GiftStatus",
     "PrayerCategory",
     "Priority",
     "PrayerStatus",
+    "PrayerVisibility",
     "DayOfWeek",
     "ServiceType",
     "AssetStatus",
@@ -170,6 +225,7 @@ __all__ = [
     "TemplateCategory",
     "ScheduleType",
     "ChurchPlan",
+    "BillingInterval",
     "MaintenanceSchedule",
     "AssetCondition",
     "AssetType",
