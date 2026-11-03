@@ -20,10 +20,10 @@ class AccountStatus(str, enum.Enum):
     PENDING = "PENDING"
 
 
-class GlobalRole(str, enum.Enum):
+# NEW: replaces GlobalRole. Church-level roles live in the Role / MemberRoleAssignment tables.
+class PlatformRole(str, enum.Enum):
+    NONE = "NONE"
     SUPER_ADMIN = "SUPER_ADMIN"
-    CHURCH_ADMIN = "CHURCH_ADMIN"
-    MEMBER = "MEMBER"
 
 
 class ChurchRole(str, enum.Enum):
@@ -33,6 +33,21 @@ class ChurchRole(str, enum.Enum):
     VOLUNTEER = "VOLUNTEER"
     ADMIN = "ADMIN"
     VISITOR = "VISITOR"
+
+
+# NEW: Member.member_type
+class MemberType(str, enum.Enum):
+    MEMBER = "MEMBER"
+    VISITOR = "VISITOR"
+    CHILD = "CHILD"
+
+
+# NEW: Member.household_role
+class HouseholdRole(str, enum.Enum):
+    HEAD = "HEAD"
+    SPOUSE = "SPOUSE"
+    CHILD = "CHILD"
+    OTHER = "OTHER"
 
 
 class MembershipStatus(str, enum.Enum):
@@ -60,6 +75,14 @@ class VolunteerStatus(str, enum.Enum):
     INACTIVE = "INACTIVE"
     ON_HOLD = "ON_HOLD"
     SUSPENDED = "SUSPENDED"
+
+
+# NEW: VolunteerAssignment.status
+class AssignmentStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    CONFIRMED = "CONFIRMED"
+    DECLINED = "DECLINED"
+    COMPLETED = "COMPLETED"
 
 
 class ClearanceLevel(str, enum.Enum):
@@ -154,6 +177,7 @@ class GoalStatus(str, enum.Enum):
     CANCELLED = "CANCELLED"
 
 
+# NOTE: now used by DepartmentMember.role (the ORM model for church roles is MemberRoleAssignment)
 class MemberRole(str, enum.Enum):
     LEADER = "LEADER"
     ASSISTANT_LEADER = "ASSISTANT_LEADER"
@@ -243,6 +267,7 @@ class PledgePurpose(str, enum.Enum):
     EDUCATION = "EDUCATION"
 
 
+# NOTE: now used by RecurringGift.interval
 class PaymentSchedule(str, enum.Enum):
     ONE_TIME = "ONE_TIME"
     WEEKLY = "WEEKLY"
@@ -256,6 +281,13 @@ class PledgeStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
     OVERDUE = "OVERDUE"
+
+
+# NEW: RecurringGift.status
+class GiftStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+    CANCELLED = "CANCELLED"
 
 
 class PrayerCategory(str, enum.Enum):
@@ -285,6 +317,14 @@ class PrayerStatus(str, enum.Enum):
     CLOSED = "CLOSED"
 
 
+# NEW: PrayerRequest.visibility
+class PrayerVisibility(str, enum.Enum):
+    PRIVATE = "PRIVATE"
+    PASTORS = "PASTORS"
+    PUBLIC = "PUBLIC"
+
+
+# NOTE: now used by AvailabilitySchedule.day_of_week
 class DayOfWeek(str, enum.Enum):
     SUNDAY = "SUNDAY"
     MONDAY = "MONDAY"
@@ -433,11 +473,18 @@ class ScheduleType(str, enum.Enum):
     DRAFT = "DRAFT"
 
 
+# Used to seed the Plan table; ChurchSubscription now references plan_id
 class ChurchPlan(str, enum.Enum):
     BASIC = "BASIC"
     MINISTRY = "MINISTRY"
     CATHEDRAL = "CATHEDRAL"
     CUSTOM = "CUSTOM"
+
+
+# NEW: Plan.billing_interval
+class BillingInterval(str, enum.Enum):
+    MONTHLY = "MONTHLY"
+    YEARLY = "YEARLY"
 
 
 class MaintenanceSchedule(str, enum.Enum):

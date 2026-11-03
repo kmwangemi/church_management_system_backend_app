@@ -1,18 +1,17 @@
 from typing import TYPE_CHECKING, List, Optional
 
-from app.db.base_class import Base, TimestampMixin, UUIDMixin
+from app.db.base_class import Base, SoftDeleteMixin, TimestampMixin, UUIDMixin
 from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 if TYPE_CHECKING:
     from app.models.auth import Invitation
-    from app.models.detail import (
-        Address,
-    )
-    from app.models.member import BranchMember, Member
+    from app.models.detail import Address, PastorAssignment
+    from app.models.member import Member
+    from app.models.subscription import ChurchSubscription
 
 
-class Church(Base, UUIDMixin, TimestampMixin):
+class Church(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "church"
 
     name: Mapped[str] = mapped_column(String(255))
@@ -23,9 +22,11 @@ class Church(Base, UUIDMixin, TimestampMixin):
     email: Mapped[Optional[str]] = mapped_column(String(255))
     phone_number: Mapped[Optional[str]] = mapped_column(String(255))
     website: Mapped[Optional[str]] = mapped_column(String(255))
+    address_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("address.id", ondelete="SET NULL")
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_suspended: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSON)
 
     # Relations
@@ -34,30 +35,34 @@ class Church(Base, UUIDMixin, TimestampMixin):
     invitations: Mapped[List["Invitation"]] = relationship(
         "Invitation", back_populates="church"
     )
-    address: Mapped[Optional["Address"]] = relationship(
-        "Address", back_populates="church", uselist=False
+    address: Mapped[Optional["Address"]] = relationship("Address")
+    subscription: Mapped[Optional["ChurchSubscription"]] = relationship(
+        "ChurchSubscription", back_populates="church", uselist=False
     )
 
 
-class Branch(Base, UUIDMixin, TimestampMixin):
+class Branch(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "branch"
 
     name: Mapped[str] = mapped_column(String(255))
-    church_id: Mapped[str] = mapped_column(ForeignKey("church.id", ondelete="CASCADE"))
+    church_id: Mapped[str] = mapped_column(
+        ForeignKey("church.id", ondelete="CASCADE"), index=True
+    )
+    address_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("address.id", ondelete="SET NULL")
+    )
     email: Mapped[Optional[str]] = mapped_column(String(255))
     phone_number: Mapped[Optional[str]] = mapped_column(String(255))
     capacity: Mapped[Optional[int]] = mapped_column(Integer)
-    member_count: Mapped[int] = mapped_column(Integer, default=0)
+    # NOTE: member_count removed. Compute it:
+    #   select count(*) from member where branch_id = :id and deleted_at is null
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSON)
 
     # Relations
     church: Mapped["Church"] = relationship("Church", back_populates="branches")
-    branch_members: Mapped[List["BranchMember"]] = relationship(
-        "BranchMember", back_populates="branch"
-    )
     members: Mapped[List["Member"]] = relationship("Member", back_populates="branch")
-    address: Mapped[Optional["Address"]] = relationship(
-        "Address", back_populates="branch", uselist=False
+    address: Mapped[Optional["Address"]] = relationship("Address")
+    pastor_assignments: Mapped[List["PastorAssignment"]] = relationship(
+        "PastorAssignment", back_populates="branch"
     )
