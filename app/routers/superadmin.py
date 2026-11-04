@@ -35,7 +35,7 @@ from app.services.audit import queue_audit
 from app.services.membership_service import generate_unique_membership_number
 from app.services.roles import resolve_roles, role_names_for_members, set_member_roles
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -46,7 +46,7 @@ router = APIRouter()
 GLOBAL_SYSTEM_SETTINGS: Dict[str, Any] = {
     "siteName": "ChurchHub Global",
     "supportEmail": "support@churchhub.com",
-    "defaultCurrency": "USD",
+    "defaultCurrency": "KES",
     "trialPeriodDays": 30,
     "maintenanceMode": False,
     "allowNewRegistrations": True,
@@ -633,19 +633,81 @@ async def delete_church(
     current_user: CurrentSuperAdmin,
     session: DbSession,
 ):
-    church = await _set_church_state(
-        session, organization_id, active=False, deleted=True
-    )
+    """
+    Permanently wipe a church and all associated data:
+    branches, members, roles, subscriptions, financial records, events, etc.
+    """
+    church = await _get_church(session, organization_id)
+    church_id = church.id
+    church_name = church.name
+
+    # 1. Gather address IDs directly associated with this church and its branches
+    addr_ids = [church.address_id] if church.address_id else []
+    branch_addr_ids = (
+        await session.execute(
+            select(Branch.address_id).where(
+                Branch.church_id == church_id, Branch.address_id.is_not(None)
+            )
+        )
+    ).scalars().all()
+    addr_ids.extend([b for b in branch_addr_ids if b])
+
+    # 2. Identify user accounts that only belong to this church (excluding platform superadmins)
+    member_user_ids = (
+        await session.execute(
+            select(Member.user_id).where(
+                Member.church_id == church_id, Member.user_id.is_not(None)
+            )
+        )
+    ).scalars().all()
+
+    orphaned_user_ids = []
+    for u_id in set(member_user_ids):
+        other_memberships_count = (
+            await session.execute(
+                select(func.count(Member.id)).where(
+                    Member.user_id == u_id, Member.church_id != church_id
+                )
+            )
+        ).scalar() or 0
+        if other_memberships_count == 0:
+            user_row = (
+                await session.execute(select(User).where(User.id == u_id))
+            ).scalar_one_or_none()
+            if user_row and user_row.platform_role != PlatformRole.SUPER_ADMIN:
+                orphaned_user_ids.append(u_id)
+
+    # 3. Direct SQL delete: PostgreSQL's ON DELETE CASCADE constraints will cascade wipe all child rows:
+    # branches, members, details, roles, assignments, subscriptions, funds, offerings, pledges,
+    # expenses, events, attendances, departments, groups, assets, facilities, etc.
+    await session.execute(delete(Church).where(Church.id == church_id))
+    await session.flush()
+
+    # 4. Wipe orphaned address records
+    if addr_ids:
+        await session.execute(delete(Address).where(Address.id.in_(addr_ids)))
+
+    # 5. Wipe orphaned user accounts & sessions that belonged strictly to this deleted church
+    if orphaned_user_ids:
+        await session.execute(
+            delete(UserSession).where(UserSession.user_id.in_(orphaned_user_ids))
+        )
+        await session.execute(delete(User).where(User.id.in_(orphaned_user_ids)))
+
+    await session.commit()
+
     queue_audit(
         background_tasks,
         request,
         "DELETE_CHURCH",
         "CHURCH",
-        church.id,
+        church_id,
         actor_user_id=current_user.id,
-        church_id=church.id,
+        church_id=None,
     )
-    return {"message": "Church deleted successfully"}
+    return {
+        "message": f"Church '{church_name}' and all associated data have been permanently wiped"
+    }
 
 
 # ============================================================================

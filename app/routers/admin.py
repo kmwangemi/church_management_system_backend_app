@@ -465,6 +465,11 @@ async def get_member_details(
     row = format_member_row(member, user, branch, roles)
     created = _iso(member.created_at) or ""
     first = contacts[0] if contacts else None
+    mem_date = (
+        _iso(md.membership_date)
+        if md and md.membership_date
+        else (_iso(member.joined_at) or created)
+    )
     return {
         "id": str(member.id),
         "membershipNumber": mem_code,
@@ -476,6 +481,13 @@ async def get_member_details(
         "roles": roles or ["MEMBER"],
         "position": member.position or "Member",
         "status": member.status.value,
+        "membershipStatus": member.status.value,
+        "membershipDate": mem_date,
+        "joinedAt": _iso(member.joined_at) or created,
+        "householdId": member.household_id,
+        "householdRole": (
+            member.household_role.value if member.household_role else None
+        ),
         "organizationId": str(member.church_id),
         "createdAt": created,
         "user": {
@@ -497,6 +509,7 @@ async def get_member_details(
             "memberId": mem_code or str(member.id),
             "role": roles or ["MEMBER"],
             "roles": roles or ["MEMBER"],
+            "memberType": member.member_type.value,
             "position": member.position or "Member",
             "churchId": str(member.church_id),
             "organizationId": str(member.church_id),
@@ -506,8 +519,11 @@ async def get_member_details(
             "householdRole": (
                 member.household_role.value if member.household_role else None
             ),
+            "status": member.status.value,
+            "membershipStatus": member.status.value,
             "createdAt": created,
             "joinedDate": member.joined_at.isoformat() if member.joined_at else created,
+            "membershipDate": mem_date,
         },
         "address": {
             "street": (addr.street if addr else "") or "",
@@ -549,25 +565,33 @@ async def get_member_details(
         ],
         "memberDetails": {
             "memberId": mem_code or str(member.id),
-            "joinedDate": (
-                _iso(md.membership_date) if md and md.membership_date else created
-            ),
+            "joinedDate": mem_date,
+            "membershipDate": mem_date,
+            "membershipStatus": member.status.value,
             "baptismDate": _iso(md.baptism_date) if md else None,
             "departmentIds": [],
             "groupIds": [],
         },
-        "volunteerDetails": {
-            "volunteerId": mem_code or str(member.id),
-            "hoursContributed": vol.hours_contributed if vol else 0,
-            "roles": [],
-        },
-        "staffDetails": {
-            "staffId": mem_code or str(member.id),
-            "department": staff.department if staff else "",
-            "jobTitle": staff.job_title if staff else "",
-            "employmentType": "FULL_TIME",
-            "startDate": _iso(staff.start_date) if staff else None,
-        },
+        "volunteerDetails": (
+            {
+                "volunteerId": str(vol.id),
+                "hoursContributed": vol.hours_contributed,
+                "roles": [],
+            }
+            if vol
+            else None
+        ),
+        "staffDetails": (
+            {
+                "staffId": str(staff.id),
+                "department": staff.department or "",
+                "jobTitle": staff.job_title or "",
+                "employmentType": "FULL_TIME",
+                "startDate": _iso(staff.start_date),
+            }
+            if staff
+            else None
+        ),
         "pastorDetails": {
             "pastorId": mem_code or str(member.id),
             "ordinationDate": _iso(pastor.ordination_date) if pastor else None,
