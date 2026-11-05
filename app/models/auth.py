@@ -54,6 +54,7 @@ class Role(Base, UUIDMixin, TimestampMixin):
             "name",
             unique=True,
             postgresql_where=text("church_id IS NULL"),
+            sqlite_where=text("church_id IS NULL"),
         ),
     )
 
@@ -92,6 +93,7 @@ class MemberRoleAssignment(Base, UUIDMixin, TimestampMixin):
             "role_id",
             unique=True,
             postgresql_where=text("branch_id IS NULL"),
+            sqlite_where=text("branch_id IS NULL"),
         ),
     )
 

@@ -58,9 +58,10 @@ api_router.include_router(assets.router, prefix="/church/assets", tags=["Assets"
 api_router.include_router(assets.router, prefix="/admin/assets", tags=["Assets"], include_in_schema=False)
 api_router.include_router(assets.router, prefix="/assets", tags=["Assets"], include_in_schema=False)
 
-# Communications (Announcements & Messages)
+# Communications (Announcements, Messages, Recipient Groups, Content, Reports)
 api_router.include_router(communications.router, prefix="/church", tags=["Communications"])
 api_router.include_router(communications.router, prefix="/admin", tags=["Communications"], include_in_schema=False)
+api_router.include_router(communications.root_router, tags=["Communications"])
 
 # Discipleship (Disciples & Milestones)
 api_router.include_router(discipleship.router, prefix="/church", tags=["Discipleship"])

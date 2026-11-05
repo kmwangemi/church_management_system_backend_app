@@ -38,7 +38,9 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
 async def _get_or_create_default_fund(session: DbSession, church_id: str) -> str:
     f = (
         await session.execute(
-            select(Fund.id).where(Fund.church_id == church_id, Fund.is_active.is_(True))
+            select(Fund.id)
+            .where(Fund.church_id == church_id, Fund.is_active.is_(True))
+            .limit(1)
         )
     ).scalar_one_or_none()
     if f:
@@ -51,7 +53,11 @@ async def _get_or_create_default_fund(session: DbSession, church_id: str) -> str
 
 
 def _format_offering(offering: Offering, m: Optional[Member] = None, u: Optional[User] = None) -> Dict[str, Any]:
-    member_name = f"{u.first_name} {u.last_name}".strip() if u else "Anonymous"
+    member_name = (
+        f"{m.first_name or ''} {m.last_name or ''}".strip()
+        if m
+        else (u.display_name if u and u.display_name else "Anonymous")
+    ) or "Anonymous"
     return {
         "_id": str(offering.id),
         "id": str(offering.id),
@@ -63,7 +69,7 @@ def _format_offering(offering: Offering, m: Optional[Member] = None, u: Optional
         "method": offering.payment_method.value if hasattr(offering.payment_method, "value") else str(offering.payment_method),
         "paymentMethod": offering.payment_method.value if hasattr(offering.payment_method, "value") else str(offering.payment_method),
         "member": member_name,
-        "memberId": str(m.id) if m else None,
+        "memberId": str(m.id) if m else (str(offering.member_id) if offering.member_id else None),
         "fundId": str(offering.fund_id),
         "pledgeId": str(offering.pledge_id) if offering.pledge_id else None,
         "status": "Completed",
@@ -72,7 +78,11 @@ def _format_offering(offering: Offering, m: Optional[Member] = None, u: Optional
 
 
 def _format_pledge(pledge: Pledge, m: Optional[Member] = None, u: Optional[User] = None) -> Dict[str, Any]:
-    member_name = f"{u.first_name} {u.last_name}".strip() if u else "Member"
+    member_name = (
+        f"{m.first_name or ''} {m.last_name or ''}".strip()
+        if m
+        else (u.display_name if u and u.display_name else "Member")
+    ) or "Member"
     return {
         "_id": str(pledge.id),
         "id": str(pledge.id),
@@ -284,27 +294,33 @@ async def create_offering(
     if not fund_id:
         fund_id = await _get_or_create_default_fund(session, church_id)
 
-    mem_id = payload.memberId or payload.member_id
-    if mem_id:
-        mem_exists = (
+    raw_mem_id = payload.memberId or payload.member_id
+    mem_obj = None
+    mem_id = None
+    if raw_mem_id:
+        mem_obj = (
             await session.execute(
-                select(Member.id).where(Member.id == mem_id, Member.church_id == church_id)
+                select(Member).where(
+                    or_(Member.id == raw_mem_id, Member.user_id == raw_mem_id),
+                    Member.church_id == church_id,
+                    Member.deleted_at.is_(None),
+                ).limit(1)
             )
         ).scalar_one_or_none()
-        if not mem_exists:
-            mem_id = None
+        if mem_obj:
+            mem_id = str(mem_obj.id)
 
     try:
         amt = Decimal(str(payload.amount))
     except Exception:
         amt = Decimal("0.00")
 
-    raw_type = (payload.type or "OFFERING").upper()
+    raw_type = (payload.type or "OFFERING").upper().replace("-", "_").replace(" ", "_")
     off_type = OfferingType[raw_type] if raw_type in OfferingType.__members__ else OfferingType.OFFERING
 
     raw_method = (payload.method or payload.payment_method or "CASH").upper().replace("-", "_").replace(" ", "_")
-    if "MPESA" in raw_method or "M_PESA" in raw_method:
-        pay_method = PaymentMethod.MOBILE_MONEY
+    if "MPESA" in raw_method or "M_PESA" in raw_method or "MOBILE" in raw_method:
+        pay_method = PaymentMethod.M_PESA
     elif raw_method in PaymentMethod.__members__:
         pay_method = PaymentMethod[raw_method]
     else:
@@ -345,7 +361,7 @@ async def create_offering(
         church_id=church_id,
     )
 
-    formatted = _format_offering(offering)
+    formatted = _format_offering(offering, mem_obj)
     return {
         "status": "success",
         "message": "Offering recorded successfully",
@@ -372,7 +388,7 @@ async def delete_offering(
     if not off:
         raise HTTPException(status_code=404, detail="Offering not found")
 
-    await session.delete(off)
+    off.soft_delete()
     await session.commit()
     return {"status": "success", "message": "Offering deleted successfully"}
 
@@ -458,14 +474,35 @@ async def create_pledge(
 
     fund_id = await _get_or_create_default_fund(session, church_id)
 
-    mem_id = payload.memberId or payload.member_id
-    if not mem_id:
-        # fallback to first member of church or actor
-        mem_id = (
+    raw_mem_id = payload.memberId or payload.member_id
+    mem_obj = None
+    mem_id = None
+    if raw_mem_id:
+        mem_obj = (
             await session.execute(
-                select(Member.id).where(Member.church_id == church_id).limit(1)
+                select(Member).where(
+                    or_(Member.id == raw_mem_id, Member.user_id == raw_mem_id),
+                    Member.church_id == church_id,
+                    Member.deleted_at.is_(None),
+                ).limit(1)
             )
         ).scalar_one_or_none()
+        if mem_obj:
+            mem_id = str(mem_obj.id)
+    if not mem_id and actor.member:
+        mem_obj = actor.member
+        mem_id = str(actor.member.id)
+    if not mem_id:
+        mem_obj = (
+            await session.execute(
+                select(Member).where(
+                    Member.church_id == church_id,
+                    Member.deleted_at.is_(None),
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if mem_obj:
+            mem_id = str(mem_obj.id)
     if not mem_id:
         raise HTTPException(status_code=400, detail="Member is required for pledge")
 
@@ -507,7 +544,7 @@ async def create_pledge(
         church_id=church_id,
     )
 
-    formatted = _format_pledge(pledge)
+    formatted = _format_pledge(pledge, mem_obj)
     return {
         "status": "success",
         "message": "Pledge created successfully",
@@ -534,7 +571,7 @@ async def delete_pledge(
     if not pledge:
         raise HTTPException(status_code=404, detail="Pledge not found")
 
-    await session.delete(pledge)
+    pledge.soft_delete()
     await session.commit()
     return {"status": "success", "message": "Pledge deleted successfully"}
 
@@ -560,6 +597,16 @@ async def get_financial_summary(
         )
     ).scalar() or 0
 
+    total_tithes = (
+        await session.execute(
+            select(func.coalesce(func.sum(Offering.amount), 0)).where(
+                Offering.church_id == actor.church_id,
+                Offering.deleted_at.is_(None),
+                Offering.type == OfferingType.TITHE,
+            )
+        )
+    ).scalar() or 0
+
     total_pledges = (
         await session.execute(
             select(func.coalesce(func.sum(Pledge.amount), 0)).where(
@@ -578,7 +625,7 @@ async def get_financial_summary(
 
     return {
         "totalOfferings": float(total_offerings),
-        "totalTithes": float(total_offerings) * 0.6,
+        "totalTithes": float(total_tithes),
         "totalPledges": float(total_pledges),
         "monthlyGoal": 50000,
         "expenses": float(total_expenses),

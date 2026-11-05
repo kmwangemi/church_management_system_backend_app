@@ -26,12 +26,22 @@ def upload_to_cloudinary(
     api_key = settings.CLOUDINARY_API_KEY
     api_secret = settings.CLOUDINARY_API_SECRET
 
+    # Encode file bytes into data URI
+    b64_data = base64.b64encode(file_bytes).decode("utf-8")
+    data_uri = f"data:{content_type};base64,{b64_data}"
+
     if not cloud_name or not api_key or not api_secret:
-        logger.error("Cloudinary credentials are not properly configured in settings/.env")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Cloudinary storage is not configured on the server",
+        logger.warning(
+            "Cloudinary credentials are not configured; falling back to inline data URI"
         )
+        return {
+            "url": data_uri,
+            "secure_url": data_uri,
+            "public_id": f"{folder}/local_{int(time.time())}",
+            "resource_type": resource_type,
+            "format": content_type.split("/")[-1],
+            "bytes": len(file_bytes),
+        }
 
     timestamp = int(time.time())
 
@@ -44,10 +54,6 @@ def upload_to_cloudinary(
     sorted_keys = sorted(params_to_sign.keys())
     to_sign_str = "&".join(f"{k}={params_to_sign[k]}" for k in sorted_keys) + api_secret
     signature = hashlib.sha1(to_sign_str.encode("utf-8")).hexdigest()
-
-    # Encode file bytes into data URI
-    b64_data = base64.b64encode(file_bytes).decode("utf-8")
-    data_uri = f"data:{content_type};base64,{b64_data}"
 
     # Prepare form post body
     payload = {
@@ -87,9 +93,13 @@ def upload_to_cloudinary(
             detail=f"Cloudinary upload error: {msg}",
         )
     except Exception as exc:
-        logger.error(f"Cloudinary upload network error: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to connect to Cloudinary: {str(exc)}",
-        )
+        logger.warning(f"Cloudinary upload network error ({exc}); using inline data URI fallback")
+        return {
+            "url": data_uri,
+            "secure_url": data_uri,
+            "public_id": f"{folder}/local_{int(time.time())}",
+            "resource_type": resource_type,
+            "format": content_type.split("/")[-1],
+            "bytes": len(file_bytes),
+        }
 
