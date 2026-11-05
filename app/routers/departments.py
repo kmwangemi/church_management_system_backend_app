@@ -63,15 +63,19 @@ async def _format_dept(session: DbSession, dept: Department) -> Dict[str, Any]:
         ).first()
         if lm:
             m, u = lm
-            first_name = (u.first_name if u else (m.first_name if m else "")) or ""
-            last_name = (u.last_name if u else (m.last_name if m else "")) or ""
-            email = (u.email if u else (m.email if m else "")) or ""
+            first_name = (m.first_name if m and m.first_name else "") or ""
+            last_name = (m.last_name if m and m.last_name else "") or ""
+            if not first_name and not last_name and u and u.display_name:
+                parts = u.display_name.strip().split(" ", 1)
+                first_name = parts[0] if parts else ""
+                last_name = parts[1] if len(parts) > 1 else ""
+            email = (m.email if m and m.email else (u.email if u else "")) or ""
             phone = (
-                (u.phone_number if u and hasattr(u, "phone_number") and u.phone_number else (m.phone_number if m else ""))
+                (m.phone_number if m and m.phone_number else (u.phone_number if u and hasattr(u, "phone_number") else ""))
                 or ""
             )
             image = (
-                (u.profile_picture_url if u and hasattr(u, "profile_picture_url") and u.profile_picture_url else (m.photo_url if m else ""))
+                (m.photo_url if m and m.photo_url else (u.profile_picture_url if u and hasattr(u, "profile_picture_url") else ""))
                 or ""
             )
             leader_data = {
@@ -93,15 +97,16 @@ async def _format_dept(session: DbSession, dept: Department) -> Dict[str, Any]:
                 )
             ).scalar_one_or_none()
             if usr:
-                first_name = usr.first_name or ""
-                last_name = usr.last_name or ""
+                parts = (usr.display_name or "").strip().split(" ", 1)
+                first_name = parts[0] if parts else ""
+                last_name = parts[1] if len(parts) > 1 else ""
                 leader_data = {
                     "_id": str(usr.id),
                     "id": str(usr.id),
                     "userId": str(usr.id),
                     "firstName": first_name,
                     "lastName": last_name,
-                    "name": f"{first_name} {last_name}".strip(),
+                    "name": f"{first_name} {last_name}".strip() or (usr.display_name or ""),
                     "email": usr.email or "",
                     "phoneNumber": usr.phone_number if hasattr(usr, "phone_number") and usr.phone_number else "",
                     "profilePictureUrl": usr.profile_picture_url if hasattr(usr, "profile_picture_url") and usr.profile_picture_url else "",
@@ -152,8 +157,8 @@ async def _format_dept(session: DbSession, dept: Department) -> Dict[str, Any]:
         "meetingTime": meeting_time,
         "_count": {
             "members": member_count,
-            "activities": 0,
-            "expenses": 0,
+            "activities": len(meta.get("activities", []) if isinstance(meta.get("activities"), list) else []),
+            "expenses": len(meta.get("expenses", []) if isinstance(meta.get("expenses"), list) else []),
         },
         "createdAt": _iso(dept.created_at),
         "updatedAt": _iso(dept.updated_at),
@@ -258,17 +263,12 @@ async def create_department(
                 select(Member).where(
                     (Member.id == leader_id) | (Member.user_id == leader_id),
                     Member.church_id == actor.church_id,
+                    Member.deleted_at.is_(None),
                 )
             )
         ).scalars().first()
         if member:
             leader_member_id = str(member.id)
-        else:
-            user_exists = (
-                await session.execute(select(User.id).where(User.id == leader_id))
-            ).scalar_one_or_none()
-            if user_exists:
-                leader_member_id = str(leader_id)
 
     tb = 0.0
     if payload.totalBudget is not None:
@@ -428,25 +428,15 @@ async def update_department(
                     select(Member).where(
                         (Member.id == payload.leaderId) | (Member.user_id == payload.leaderId),
                         Member.church_id == actor.church_id,
+                        Member.deleted_at.is_(None),
                     )
                 )
             ).scalars().first()
-            new_leader_id = str(member.id) if member else str(payload.leaderId)
+            new_leader_id = str(member.id) if member else None
             dept.leader_member_id = new_leader_id
 
             # Update or add to DepartmentMember with MemberRole.LEADER
-            mem_rec_id = str(member.id) if member else None
-            if not mem_rec_id:
-                m_rec = (
-                    await session.execute(
-                        select(Member.id).where(
-                            (Member.id == new_leader_id) | (Member.user_id == new_leader_id),
-                            Member.church_id == actor.church_id,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if m_rec:
-                    mem_rec_id = str(m_rec)
+            mem_rec_id = new_leader_id
 
             if mem_rec_id:
                 existing_dm = (
@@ -592,8 +582,12 @@ async def list_department_members(
     members_list = []
     has_leader = False
     for dm, m, u in dm_rows:
-        first_name = (u.first_name if u else (m.first_name if m else "")) or ""
-        last_name = (u.last_name if u else (m.last_name if m else "")) or ""
+        first_name = (m.first_name if m and m.first_name else "") or ""
+        last_name = (m.last_name if m and m.last_name else "") or ""
+        if not first_name and not last_name and u and u.display_name:
+            parts = u.display_name.strip().split(" ", 1)
+            first_name = parts[0] if parts else ""
+            last_name = parts[1] if len(parts) > 1 else ""
         role_str = (dm.role.value if hasattr(dm.role, "value") else str(dm.role)).lower()
         if role_str == "leader":
             has_leader = True
@@ -603,16 +597,17 @@ async def list_department_members(
                 "id": str(dm.id),
                 "memberId": str(m.id),
                 "userId": {
-                    "_id": str(u.id) if u else str(m.id),
+                    "_id": str(m.id),
+                    "id": str(m.id),
                     "firstName": first_name,
                     "lastName": last_name,
-                    "email": (u.email if u else (m.email or "")) or "",
+                    "email": (m.email if m and m.email else (u.email if u else "")) or "",
                     "phoneNumber": (
-                        (u.phone_number if u and hasattr(u, "phone_number") and u.phone_number else (m.phone_number or ""))
+                        (m.phone_number if m and m.phone_number else (u.phone_number if u and hasattr(u, "phone_number") else ""))
                         or ""
                     ),
                     "profilePictureUrl": (
-                        (u.profile_picture_url if u and hasattr(u, "profile_picture_url") and u.profile_picture_url else (m.photo_url or ""))
+                        (m.photo_url if m and m.photo_url else (u.profile_picture_url if u and hasattr(u, "profile_picture_url") else ""))
                         or ""
                     ),
                 },
@@ -637,23 +632,28 @@ async def list_department_members(
         ).first()
         if lm:
             m, u = lm
-            first_name = (u.first_name if u else (m.first_name if m else "")) or ""
-            last_name = (u.last_name if u else (m.last_name if m else "")) or ""
+            first_name = (m.first_name if m and m.first_name else "") or ""
+            last_name = (m.last_name if m and m.last_name else "") or ""
+            if not first_name and not last_name and u and u.display_name:
+                parts = u.display_name.strip().split(" ", 1)
+                first_name = parts[0] if parts else ""
+                last_name = parts[1] if len(parts) > 1 else ""
             leader_entry = {
                 "_id": f"leader_{m.id}",
                 "id": f"leader_{m.id}",
                 "memberId": str(m.id),
                 "userId": {
-                    "_id": str(u.id) if u else str(m.id),
+                    "_id": str(m.id),
+                    "id": str(m.id),
                     "firstName": first_name,
                     "lastName": last_name,
-                    "email": (u.email if u else (m.email or "")) or "",
+                    "email": (m.email if m and m.email else (u.email if u else "")) or "",
                     "phoneNumber": (
-                        (u.phone_number if u and hasattr(u, "phone_number") and u.phone_number else (m.phone_number or ""))
+                        (m.phone_number if m and m.phone_number else (u.phone_number if u and hasattr(u, "phone_number") else ""))
                         or ""
                     ),
                     "profilePictureUrl": (
-                        (u.profile_picture_url if u and hasattr(u, "profile_picture_url") and u.profile_picture_url else (m.photo_url or ""))
+                        (m.photo_url if m and m.photo_url else (u.profile_picture_url if u and hasattr(u, "profile_picture_url") else ""))
                         or ""
                     ),
                 },
@@ -671,8 +671,9 @@ async def list_department_members(
                 )
             ).scalar_one_or_none()
             if usr:
-                first_name = usr.first_name or ""
-                last_name = usr.last_name or ""
+                parts = (usr.display_name or "").strip().split(" ", 1)
+                first_name = parts[0] if parts else ""
+                last_name = parts[1] if len(parts) > 1 else ""
                 leader_entry = {
                     "_id": f"leader_{usr.id}",
                     "id": f"leader_{usr.id}",
@@ -736,18 +737,39 @@ async def add_department_member(
     if not dept:
         raise HTTPException(status_code=404, detail="Department not found")
 
-    mem_id = payload.memberId
+    raw_mem_id = payload.memberId
+    mem_id = None
+    if raw_mem_id:
+        found_mem = (
+            await session.execute(
+                select(Member.id).where(
+                    or_(Member.id == raw_mem_id, Member.user_id == raw_mem_id),
+                    Member.church_id == actor.church_id,
+                    Member.deleted_at.is_(None),
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if found_mem:
+            mem_id = str(found_mem)
     if not mem_id:
         first_mem = (
             await session.execute(
-                select(Member).where(Member.church_id == actor.church_id).limit(1)
+                select(Member).where(
+                    Member.church_id == actor.church_id,
+                    Member.deleted_at.is_(None),
+                ).limit(1)
             )
         ).scalar_one_or_none()
         if first_mem:
-            mem_id = first_mem.id
+            mem_id = str(first_mem.id)
         else:
             raise HTTPException(status_code=400, detail="Member ID is required")
 
+    role_enum = (
+        MemberRole.LEADER
+        if (payload.role or "").lower() == "leader"
+        else MemberRole.MEMBER
+    )
     existing = (
         await session.execute(
             select(DepartmentMember).where(
@@ -760,10 +782,65 @@ async def add_department_member(
         dm = DepartmentMember(
             department_id=dept.id,
             member_id=mem_id,
+            role=role_enum,
         )
         session.add(dm)
-        await session.commit()
+    else:
+        existing.role = role_enum
+
+    if role_enum == MemberRole.LEADER:
+        dept.leader_member_id = mem_id
+
+    await session.commit()
     return {"success": True, "message": "Member added to department"}
+
+
+@router.put("/{department_id}/members/{member_id}")
+async def update_department_member(
+    department_id: str,
+    member_id: str,
+    payload: Dict[str, Any],
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+
+    dm = (
+        await session.execute(
+            select(DepartmentMember).where(
+                DepartmentMember.department_id == dept.id,
+                or_(
+                    DepartmentMember.id == member_id,
+                    DepartmentMember.member_id == member_id,
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    role_str = (payload.get("role") or "member").lower()
+    role_enum = (
+        MemberRole.LEADER
+        if role_str == "leader"
+        else MemberRole.ASSISTANT_LEADER
+        if "assistant" in role_str
+        else MemberRole.MEMBER
+    )
+    if dm:
+        dm.role = role_enum
+        if role_enum == MemberRole.LEADER:
+            dept.leader_member_id = dm.member_id
+        await session.commit()
+    return {"success": True, "message": "Department member updated successfully"}
 
 
 @router.delete("/{department_id}/members/{member_id}")
@@ -774,6 +851,7 @@ async def remove_department_member(
     current_user: CurrentUser,
     session: DbSession,
 ):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
     await session.execute(
         delete(DepartmentMember).where(
             DepartmentMember.department_id == department_id,
@@ -795,16 +873,45 @@ async def list_department_activities(
     session: DbSession,
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1),
+    search: str = Query(""),
+    activityType: Optional[str] = Query(None),
 ):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    _, meta = _parse_dept_desc(dept.description)
+    activities = list(meta.get("activities") or [])
+    if search:
+        s = search.lower()
+        activities = [
+            a for a in activities
+            if s in (a.get("title") or "").lower() or s in (a.get("description") or "").lower()
+        ]
+    if activityType and activityType != "all":
+        activities = [
+            a for a in activities if (a.get("type") or "").lower() == activityType.lower()
+        ]
+    total = len(activities)
+    total_pages = max(1, math.ceil(total / limit))
+    offset = (page - 1) * limit
+    paginated = activities[offset : offset + limit]
     return {
         "success": True,
         "data": {
-            "activities": [],
+            "activities": paginated,
             "pagination": {
                 "currentPage": page,
-                "totalPages": 1,
-                "totalActivities": 0,
-                "hasMore": False,
+                "totalPages": total_pages,
+                "totalActivities": total,
+                "hasMore": page < total_pages,
             },
         },
     }
@@ -813,11 +920,83 @@ async def list_department_activities(
 @router.post("/{department_id}/activities")
 async def create_department_activity(
     department_id: str,
+    payload: Dict[str, Any],
     request: Request,
     current_user: CurrentUser,
     session: DbSession,
 ):
-    return {"success": True, "message": "Activity logged successfully"}
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    clean_desc, meta = _parse_dept_desc(dept.description)
+    activities = list(meta.get("activities") or [])
+    aid = str(uuid.uuid4())
+    new_act = {
+        "_id": aid,
+        "id": aid,
+        "title": payload.get("title") or payload.get("activity") or "Department Activity",
+        "description": payload.get("description") or "",
+        "type": (payload.get("type") or "meeting").lower(),
+        "date": payload.get("date") or _iso(_now()),
+        "startTime": payload.get("startTime") or "09:00",
+        "endTime": payload.get("endTime") or "11:00",
+        "location": payload.get("location") or meta.get("location", "Main Campus"),
+        "participants": payload.get("participants") if isinstance(payload.get("participants"), list) else [],
+        "organizedBy": payload.get("organizedBy") or dept.name,
+        "notes": payload.get("notes") or "",
+        "isCompleted": bool(payload.get("isCompleted", False)),
+        "createdAt": _iso(_now()),
+        "updatedAt": _iso(_now()),
+    }
+    activities.insert(0, new_act)
+    meta["activities"] = activities
+    dept.description = _build_dept_desc(clean_desc, meta)
+    dept.updated_at = _now()
+    await session.commit()
+    return {"success": True, "message": "Activity logged successfully", "data": new_act}
+
+
+@router.put("/{department_id}/activities/{activity_id}")
+async def update_department_activity(
+    department_id: str,
+    activity_id: str,
+    payload: Dict[str, Any],
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    clean_desc, meta = _parse_dept_desc(dept.description)
+    activities = list(meta.get("activities") or [])
+    for a in activities:
+        if a.get("_id") == activity_id or a.get("id") == activity_id:
+            for k in ("title", "description", "type", "date", "startTime", "endTime", "location", "notes", "isCompleted"):
+                if k in payload and payload[k] is not None:
+                    a[k] = payload[k]
+            a["updatedAt"] = _iso(_now())
+    meta["activities"] = activities
+    dept.description = _build_dept_desc(clean_desc, meta)
+    dept.updated_at = _now()
+    await session.commit()
+    return {"success": True, "message": "Activity updated successfully"}
 
 
 @router.delete("/{department_id}/activities/{activity_id}")
@@ -828,6 +1007,24 @@ async def delete_department_activity(
     current_user: CurrentUser,
     session: DbSession,
 ):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if dept:
+        clean_desc, meta = _parse_dept_desc(dept.description)
+        meta["activities"] = [
+            a for a in (meta.get("activities") or [])
+            if a.get("_id") != activity_id and a.get("id") != activity_id
+        ]
+        dept.description = _build_dept_desc(clean_desc, meta)
+        dept.updated_at = _now()
+        await session.commit()
     return {"success": True, "message": "Activity deleted successfully"}
 
 
@@ -839,6 +1036,8 @@ async def list_department_expenses(
     session: DbSession,
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1),
+    search: str = Query(""),
+    category: Optional[str] = Query(None),
 ):
     actor = await resolve_actor(session, current_user, church_id_from(request))
     dept = (
@@ -853,24 +1052,43 @@ async def list_department_expenses(
     clean_desc, meta = _parse_dept_desc(dept.description if dept else "")
     total_budget = float(meta.get("totalBudget") or 0)
     dept_name = dept.name if dept else "Department"
+    expenses = list(meta.get("expenses") or [])
+    total_spent = sum(float(e.get("amount") or 0) for e in expenses)
+
+    if search:
+        s = search.lower()
+        expenses = [
+            e for e in expenses
+            if s in (e.get("description") or "").lower() or s in (e.get("vendor") or "").lower()
+        ]
+    if category and category != "all":
+        expenses = [
+            e for e in expenses if (e.get("category") or "").lower() == category.lower()
+        ]
+
+    filtered_total = sum(float(e.get("amount") or 0) for e in expenses)
+    total = len(expenses)
+    pages = max(1, math.ceil(total / limit))
+    offset = (page - 1) * limit
+    paginated = expenses[offset : offset + limit]
 
     return {
         "success": True,
-        "expenses": [],
+        "expenses": paginated,
         "pagination": {
             "page": page,
             "limit": limit,
-            "total": 0,
-            "pages": 1,
-            "hasNext": False,
-            "hasPrev": False,
+            "total": total,
+            "pages": pages,
+            "hasNext": page < pages,
+            "hasPrev": page > 1,
         },
         "summary": {
-            "filteredTotal": 0,
+            "filteredTotal": filtered_total,
             "departmentName": dept_name,
             "totalBudget": total_budget,
-            "totalSpent": 0,
-            "remainingBudget": total_budget,
+            "totalSpent": total_spent,
+            "remainingBudget": max(0.0, total_budget - total_spent),
             "budgetCategories": [],
         },
     }
@@ -879,11 +1097,82 @@ async def list_department_expenses(
 @router.post("/{department_id}/expenses")
 async def create_department_expense(
     department_id: str,
+    payload: Dict[str, Any],
     request: Request,
     current_user: CurrentUser,
     session: DbSession,
 ):
-    return {"success": True, "message": "Expense recorded successfully"}
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    clean_desc, meta = _parse_dept_desc(dept.description)
+    expenses = list(meta.get("expenses") or [])
+    eid = str(uuid.uuid4())
+    new_exp = {
+        "_id": eid,
+        "id": eid,
+        "category": (payload.get("category") or "supplies").lower(),
+        "amount": float(payload.get("amount") or 0),
+        "description": payload.get("description") or "",
+        "date": payload.get("date") or _iso(_now()),
+        "approvedBy": payload.get("approvedBy") or "",
+        "receiptUrl": payload.get("receiptUrl") or "",
+        "reference": payload.get("reference") or "",
+        "vendor": payload.get("vendor") or "",
+        "createdAt": _iso(_now()),
+        "updatedAt": _iso(_now()),
+    }
+    expenses.insert(0, new_exp)
+    meta["expenses"] = expenses
+    dept.description = _build_dept_desc(clean_desc, meta)
+    dept.updated_at = _now()
+    await session.commit()
+    return {"success": True, "message": "Expense recorded successfully", "data": new_exp}
+
+
+@router.put("/{department_id}/expenses/{expense_id}")
+async def update_department_expense(
+    department_id: str,
+    expense_id: str,
+    payload: Dict[str, Any],
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    clean_desc, meta = _parse_dept_desc(dept.description)
+    expenses = list(meta.get("expenses") or [])
+    for e in expenses:
+        if e.get("_id") == expense_id or e.get("id") == expense_id:
+            for k in ("category", "description", "date", "approvedBy", "receiptUrl", "reference", "vendor"):
+                if k in payload and payload[k] is not None:
+                    e[k] = payload[k]
+            if "amount" in payload and payload["amount"] is not None:
+                e["amount"] = float(payload["amount"])
+            e["updatedAt"] = _iso(_now())
+    meta["expenses"] = expenses
+    dept.description = _build_dept_desc(clean_desc, meta)
+    dept.updated_at = _now()
+    await session.commit()
+    return {"success": True, "message": "Expense updated successfully"}
 
 
 @router.delete("/{department_id}/expenses/{expense_id}")
@@ -894,6 +1183,24 @@ async def delete_department_expense(
     current_user: CurrentUser,
     session: DbSession,
 ):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if dept:
+        clean_desc, meta = _parse_dept_desc(dept.description)
+        meta["expenses"] = [
+            e for e in (meta.get("expenses") or [])
+            if e.get("_id") != expense_id and e.get("id") != expense_id
+        ]
+        dept.description = _build_dept_desc(clean_desc, meta)
+        dept.updated_at = _now()
+        await session.commit()
     return {"success": True, "message": "Expense deleted successfully"}
 
 
@@ -905,18 +1212,51 @@ async def list_department_goals(
     session: DbSession,
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1),
+    search: str = Query(""),
+    priority: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
 ):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    _, meta = _parse_dept_desc(dept.description)
+    goals = list(meta.get("goals") or [])
+    if search:
+        s = search.lower()
+        goals = [
+            g for g in goals
+            if s in (g.get("title") or "").lower() or s in (g.get("description") or "").lower()
+        ]
+    if priority and priority != "all":
+        goals = [g for g in goals if (g.get("priority") or "").lower() == priority.lower()]
+    if category and category != "all":
+        goals = [g for g in goals if (g.get("category") or "").lower() == category.lower()]
+    if status and status != "all":
+        goals = [g for g in goals if (g.get("status") or "").lower() == status.lower()]
+    total = len(goals)
+    pages = max(1, math.ceil(total / limit))
+    offset = (page - 1) * limit
+    paginated = goals[offset : offset + limit]
     return {
         "success": True,
         "data": {
-            "goals": [],
+            "goals": paginated,
             "pagination": {
                 "page": page,
                 "limit": limit,
-                "total": 0,
-                "pages": 1,
-                "hasNext": False,
-                "hasPrev": False,
+                "total": total,
+                "pages": pages,
+                "hasNext": page < pages,
+                "hasPrev": page > 1,
             },
         },
     }
@@ -925,11 +1265,83 @@ async def list_department_goals(
 @router.post("/{department_id}/goals")
 async def create_department_goal(
     department_id: str,
+    payload: Dict[str, Any],
     request: Request,
     current_user: CurrentUser,
     session: DbSession,
 ):
-    return {"success": True, "message": "Goal created successfully"}
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    clean_desc, meta = _parse_dept_desc(dept.description)
+    goals = list(meta.get("goals") or [])
+    gid = str(uuid.uuid4())
+    new_goal = {
+        "_id": gid,
+        "id": gid,
+        "title": payload.get("title") or "Department Goal",
+        "description": payload.get("description") or "",
+        "targetDate": payload.get("targetDate") or _iso(_now()),
+        "status": (payload.get("status") or "planned").lower(),
+        "progress": int(float(payload.get("progress") or 0)),
+        "priority": payload.get("priority") or "Medium",
+        "category": payload.get("category") or "Growth",
+        "success": payload.get("success") or "",
+        "createdBy": current_user.display_name or current_user.email or "Admin",
+        "createdAt": _iso(_now()),
+        "updatedAt": _iso(_now()),
+    }
+    goals.insert(0, new_goal)
+    meta["goals"] = goals
+    dept.description = _build_dept_desc(clean_desc, meta)
+    dept.updated_at = _now()
+    await session.commit()
+    return {"success": True, "message": "Goal created successfully", "data": new_goal}
+
+
+@router.put("/{department_id}/goals/{goal_id}")
+async def update_department_goal(
+    department_id: str,
+    goal_id: str,
+    payload: Dict[str, Any],
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    clean_desc, meta = _parse_dept_desc(dept.description)
+    goals = list(meta.get("goals") or [])
+    for g in goals:
+        if g.get("_id") == goal_id or g.get("id") == goal_id:
+            for k in ("title", "description", "targetDate", "status", "priority", "category", "success"):
+                if k in payload and payload[k] is not None:
+                    g[k] = payload[k]
+            if "progress" in payload and payload["progress"] is not None:
+                g["progress"] = int(float(payload["progress"]))
+            g["updatedAt"] = _iso(_now())
+    meta["goals"] = goals
+    dept.description = _build_dept_desc(clean_desc, meta)
+    dept.updated_at = _now()
+    await session.commit()
+    return {"success": True, "message": "Goal updated successfully"}
 
 
 @router.delete("/{department_id}/goals/{goal_id}")
@@ -940,4 +1352,22 @@ async def delete_department_goal(
     current_user: CurrentUser,
     session: DbSession,
 ):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    dept = (
+        await session.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if dept:
+        clean_desc, meta = _parse_dept_desc(dept.description)
+        meta["goals"] = [
+            g for g in (meta.get("goals") or [])
+            if g.get("_id") != goal_id and g.get("id") != goal_id
+        ]
+        dept.description = _build_dept_desc(clean_desc, meta)
+        dept.updated_at = _now()
+        await session.commit()
     return {"success": True, "message": "Goal deleted successfully"}

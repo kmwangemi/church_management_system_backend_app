@@ -49,6 +49,7 @@ async def _get_or_create_default_event(session: DbSession, church_id: str) -> st
             select(Event.id)
             .where(Event.church_id == church_id)
             .order_by(Event.created_at.desc())
+            .limit(1)
         )
     ).scalar_one_or_none()
     if evt:
@@ -98,8 +99,8 @@ async def list_attendance(
         s = f"%{search.strip()}%"
         query = query.where(
             or_(
-                User.first_name.ilike(s),
-                User.last_name.ilike(s),
+                Member.first_name.ilike(s),
+                Member.last_name.ilike(s),
                 Member.membership_number.ilike(s),
                 Event.name.ilike(s),
             )
@@ -128,12 +129,18 @@ async def list_attendance(
     # Format into groups or list
     records = []
     for att, m, u, evt in rows:
+        first_name = (m.first_name if m and m.first_name else "") or ""
+        last_name = (m.last_name if m and m.last_name else "") or ""
+        if not first_name and not last_name and u and u.display_name:
+            parts = u.display_name.strip().split(" ", 1)
+            first_name = parts[0] if parts else ""
+            last_name = parts[1] if len(parts) > 1 else ""
         user_info = {
             "_id": str(m.id),
             "id": str(m.id),
-            "firstName": u.first_name if u else "",
-            "lastName": u.last_name if u else "",
-            "email": u.email if u else "",
+            "firstName": first_name,
+            "lastName": last_name,
+            "email": (m.email if m and m.email else (u.email if u else "")) or "",
             "membershipNumber": m.membership_number or "",
         }
         records.append(
@@ -172,6 +179,7 @@ async def list_attendance(
     response.headers["X-Total-Count"] = str(total)
 
     return {
+        "attendance": records,
         "attendances": records,
         "data": records,
         "pagination": {
@@ -218,18 +226,21 @@ async def create_attendance(
     created_attendances = []
 
     for item in records:
-        mem_id = item.userId or item.memberId
-        if not mem_id:
+        raw_mem_id = item.userId or item.memberId
+        if not raw_mem_id:
             continue
         mem_exists = (
             await session.execute(
                 select(Member.id).where(
-                    Member.id == mem_id, Member.church_id == actor.church_id
-                )
+                    or_(Member.id == raw_mem_id, Member.user_id == raw_mem_id),
+                    Member.church_id == actor.church_id,
+                    Member.deleted_at.is_(None),
+                ).limit(1)
             )
         ).scalar_one_or_none()
         if not mem_exists:
             continue
+        mem_id = str(mem_exists)
 
         raw_status = (item.status or "present").upper()
         status_enum = (
@@ -313,12 +324,18 @@ async def get_attendance(
         raise HTTPException(status_code=404, detail="Attendance record not found")
 
     att, m, u, evt = att_row
+    first_name = (m.first_name if m and m.first_name else "") or ""
+    last_name = (m.last_name if m and m.last_name else "") or ""
+    if not first_name and not last_name and u and u.display_name:
+        parts = u.display_name.strip().split(" ", 1)
+        first_name = parts[0] if parts else ""
+        last_name = parts[1] if len(parts) > 1 else ""
     user_info = {
         "_id": str(m.id),
         "id": str(m.id),
-        "firstName": u.first_name if u else "",
-        "lastName": u.last_name if u else "",
-        "email": u.email if u else "",
+        "firstName": first_name,
+        "lastName": last_name,
+        "email": (m.email if m and m.email else (u.email if u else "")) or "",
         "membershipNumber": m.membership_number or "",
     }
     res_obj = {

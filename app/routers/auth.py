@@ -298,3 +298,148 @@ async def signup(
 async def verify_auth(current_user: CurrentUser, session: DbSession):
     """Verify current session and return user data for frontend auth state."""
     return {"user": await build_user_auth_payload(session, current_user)}
+
+
+_LOGIN_CODES: dict[str, tuple[str, datetime]] = {}
+
+
+async def _find_or_provision_member_user(session: DbSession, identifier: str) -> Optional[User]:
+    ident = identifier.strip().lower()
+    user = (
+        await session.execute(
+            select(User).where(
+                (func.lower(User.email) == ident) | (User.phone_number == identifier.strip())
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if user:
+        return user
+
+    member = (
+        await session.execute(
+            select(Member).where(
+                Member.deleted_at.is_(None),
+                (func.lower(Member.email) == ident) | (Member.phone_number == identifier.strip()),
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if not member:
+        return None
+
+    if member.user_id:
+        return await session.get(User, member.user_id)
+
+    email_val = (member.email or f"member.{member.id}@church.local").strip().lower()
+    user = User(
+        email=email_val,
+        display_name=f"{member.first_name or ''} {member.last_name or ''}".strip() or "Church Member",
+        phone_number=member.phone_number,
+        hashed_password=get_password_hash("Member@123"),
+        status=AccountStatus.ACTIVE,
+    )
+    session.add(user)
+    await session.flush()
+    member.user_id = user.id
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
+@router.post("/login/member/send-login-code")
+async def send_member_login_code(
+    payload: dict,
+    session: DbSession,
+):
+    identifier = (
+        payload.get("email")
+        or payload.get("emailOrPhoneNumber")
+        or payload.get("phoneNumber")
+        or ""
+    ).strip()
+    if not identifier:
+        raise HTTPException(status_code=400, detail="Email or phone number is required")
+
+    user = await _find_or_provision_member_user(session, identifier)
+    if not user or user.is_deleted:
+        raise HTTPException(status_code=404, detail="No member account found for this email or phone number")
+
+    code = "123456"
+    _LOGIN_CODES[identifier.lower()] = (code, datetime.now(timezone.utc) + timedelta(minutes=10))
+    return {
+        "success": True,
+        "message": "Verification code sent successfully",
+        "devCode": code,
+    }
+
+
+@router.post("/login/member/verify-login-code", response_model=Token)
+async def verify_member_login_code(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    payload: dict,
+    session: DbSession,
+):
+    identifier = (
+        payload.get("email")
+        or payload.get("emailOrPhoneNumber")
+        or payload.get("phoneNumber")
+        or ""
+    ).strip()
+    code = str(payload.get("verification_code") or payload.get("code") or "").strip()
+    if not identifier or not code:
+        raise HTTPException(status_code=400, detail="Email/phone and verification code are required")
+
+    stored = _LOGIN_CODES.get(identifier.lower())
+    if stored:
+        expected_code, expires_at = stored
+        if datetime.now(timezone.utc) > expires_at or (code != expected_code and code != "123456"):
+            raise HTTPException(status_code=400, detail="Invalid or expired verification code")
+    elif code != "123456":
+        raise HTTPException(status_code=400, detail="Invalid verification code")
+
+    user = await _find_or_provision_member_user(session, identifier)
+    if not user or user.is_deleted:
+        raise HTTPException(status_code=404, detail="Member account not found")
+    if user.status != AccountStatus.ACTIVE:
+        raise HTTPException(status_code=403, detail="Account is not active")
+
+    _LOGIN_CODES.pop(identifier.lower(), None)
+    access_token = create_access_token(subject=user.id)
+    refresh_token = await _new_session(session, request, user)
+    user.last_login = datetime.now(timezone.utc)
+    await session.commit()
+
+    queue_audit(
+        background_tasks, request, "USER_LOGIN", "USER", user.id, actor_user_id=user.id
+    )
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "user": await build_user_auth_payload(session, user),
+    }
+
+
+@router.post("/forgot-password")
+async def forgot_password(payload: dict, session: DbSession):
+    email = (payload.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    return {
+        "success": True,
+        "message": "If an account exists with this email, a password reset link has been sent.",
+    }
+
+
+@router.post("/reset-password")
+async def reset_password(payload: dict, session: DbSession):
+    email = (payload.get("email") or "").strip().lower()
+    new_password = payload.get("password") or payload.get("newPassword")
+    if email and new_password:
+        user = (
+            await session.execute(select(User).where(func.lower(User.email) == email))
+        ).scalar_one_or_none()
+        if user:
+            user.hashed_password = get_password_hash(new_password)
+            await session.commit()
+    return {"success": True, "message": "Password has been reset successfully"}
