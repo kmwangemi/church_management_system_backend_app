@@ -1,6 +1,6 @@
 import enum
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy.orm.attributes import flag_modified
 from app.core.deps import (
@@ -12,7 +12,7 @@ from app.core.deps import (
     require,
     resolve_actor,
 )
-from app.core.security import get_password_hash
+from app.core.security import get_password_hash, verify_password
 from app.core.seed import (
     ADMIN_ROLE_NAMES,
     DEFAULT_ROLE_PERMISSIONS,
@@ -20,7 +20,14 @@ from app.core.seed import (
     ROLE_DESCRIPTIONS,
     seed_permissions,
 )
-from app.enums import AccountStatus, Gender, MemberType, MembershipStatus
+from app.enums import (
+    AccountStatus,
+    EventStatus,
+    Gender,
+    MemberType,
+    MembershipStatus,
+    PrayerStatus,
+)
 from app.models.auth import MemberRoleAssignment, Permission, Role, role_permission
 from app.models.church import Branch, Church
 from app.models.detail import (
@@ -35,8 +42,11 @@ from app.models.detail import (
     VisitorDetails,
     VolunteerDetails,
 )
-from app.models.group import Department, DepartmentMember
+from app.models.event import Attendance, Event
+from app.models.finance import Fund, Offering, Pledge
+from app.models.group import Department, DepartmentMember, Group, GroupMember
 from app.models.member import Guardian, Household, Member
+from app.models.operation import Asset, MaintenanceRecord, PrayerRequest
 from app.models.user import User
 from app.schemas.admin import (
     AdminBranchCreateRequest,
@@ -57,7 +67,7 @@ from app.services.roles import (
     role_names_for_members,
     set_member_roles,
 )
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query, Request
 from sqlalchemy import delete, func, insert, or_, select
 from sqlalchemy.exc import IntegrityError
 
@@ -173,15 +183,28 @@ async def _upsert_detail(
     data: Dict[str, Any],
     defaults: Optional[Dict[str, Any]] = None,
 ):
+    valid_cols = {c.key for c in model.__table__.columns}
+    not_null_cols = {
+        c.key for c in model.__table__.columns if not c.nullable and c.key != "id"
+    }
     row = (
         await session.execute(select(model).where(model.member_id == member_id))
     ).scalar_one_or_none()
-    data = {k: _plain(v) for k, v in data.items()}
+    clean_data = {
+        k: _plain(v)
+        for k, v in data.items()
+        if k in valid_cols and not (v is None and k in not_null_cols)
+    }
+    clean_defaults = {
+        k: _plain(v)
+        for k, v in (defaults or {}).items()
+        if k in valid_cols
+    }
     if row is None:
-        row = model(member_id=member_id, **{**(defaults or {}), **data})
+        row = model(member_id=member_id, **{**clean_defaults, **clean_data})
         session.add(row)
     else:
-        for k, v in data.items():
+        for k, v in clean_data.items():
             setattr(row, k, v)
     return row
 
@@ -214,12 +237,17 @@ async def _replace_emergency_contacts(session, member_id: str, contacts) -> None
         delete(EmergencyContact).where(EmergencyContact.member_id == member_id)
     )
     for c in contacts or []:
+        fname = (c.full_name or "").strip()
+        phone = (c.phone_number or "").strip()
+        if not fname and not phone:
+            continue
         session.add(
             EmergencyContact(
                 member_id=member_id,
-                full_name=c.full_name,
-                phone_number=c.phone_number,
-                relationship_type=c.relationship_type,
+                full_name=fname or "Emergency Contact",
+                phone_number=phone or "N/A",
+                relationship_type=(c.relationship_type or "Relative").strip()
+                or "Relative",
                 email=c.email,
                 address=c.address,
                 notes=c.notes,
@@ -295,6 +323,78 @@ def format_member_row(
 # ============================================================================
 # MEMBERS MANAGEMENT (/admin/members)
 # ============================================================================
+STAFF_AND_LEADERSHIP_ROLES = {
+    "OWNER",
+    "ADMIN",
+    "PASTOR",
+    "BISHOP",
+    "STAFF",
+    "TREASURER",
+    "VOLUNTEER",
+}
+
+
+async def _compute_church_member_stats(session: DbSession, church_id: str) -> dict:
+    base = [Member.church_id == church_id, Member.deleted_at.is_(None)]
+    by_status = dict(
+        (
+            await session.execute(
+                select(Member.status, func.count(Member.id))
+                .where(*base)
+                .group_by(Member.status)
+            )
+        ).all()
+    )
+    by_type = dict(
+        (
+            await session.execute(
+                select(Member.member_type, func.count(Member.id))
+                .where(*base)
+                .group_by(Member.member_type)
+            )
+        ).all()
+    )
+    admins = (
+        await session.execute(
+            select(func.count(func.distinct(Member.id)))
+            .join(MemberRoleAssignment, MemberRoleAssignment.member_id == Member.id)
+            .join(Role, Role.id == MemberRoleAssignment.role_id)
+            .where(*base, func.upper(Role.name).in_(ADMIN_ROLE_NAMES))
+        )
+    ).scalar() or 0
+    staff_count = (
+        await session.execute(
+            select(func.count(func.distinct(Member.id)))
+            .join(MemberRoleAssignment, MemberRoleAssignment.member_id == Member.id)
+            .join(Role, Role.id == MemberRoleAssignment.role_id)
+            .where(*base, func.upper(Role.name).in_(STAFF_AND_LEADERSHIP_ROLES))
+        )
+    ).scalar() or 0
+    total = sum(by_status.values())
+    active = by_status.get(MembershipStatus.ACTIVE, 0)
+    suspended = (
+        await session.execute(
+            select(func.count(Member.id))
+            .join(User, User.id == Member.user_id)
+            .where(*base, User.status == AccountStatus.SUSPENDED)
+        )
+    ).scalar() or 0
+    inactive = max(0, total - active - suspended)
+    return {
+        "total": total,
+        "active": active,
+        "inactive": inactive,
+        "staff": staff_count,
+        "totalMembers": total,
+        "activeMembers": active,
+        "inactiveMembers": inactive,
+        "suspendedMembers": suspended,
+        "admins": admins,
+        "visitors": by_type.get(MemberType.VISITOR, 0),
+        "children": by_type.get(MemberType.CHILD, 0),
+    }
+
+
 @router.get("/members")
 @router.get("/users")
 async def get_organization_members(
@@ -365,9 +465,11 @@ async def get_organization_members(
     items = [
         format_member_row(m, u, b, roles_by_member.get(m.id, [])) for m, u, b in rows
     ]
+    statistics = await _compute_church_member_stats(session, actor.church_id)
     return {
         "members": items,
         "users": items,
+        "statistics": statistics,
         "pagination": _pagination(total, page, pageSize),
     }
 
@@ -382,51 +484,7 @@ async def get_member_statistics(
     actor = await authorize(
         session, current_user, church_id_from(request, organizationId), "member.read"
     )
-    base = [Member.church_id == actor.church_id, Member.deleted_at.is_(None)]
-    by_status = dict(
-        (
-            await session.execute(
-                select(Member.status, func.count(Member.id))
-                .where(*base)
-                .group_by(Member.status)
-            )
-        ).all()
-    )
-    by_type = dict(
-        (
-            await session.execute(
-                select(Member.member_type, func.count(Member.id))
-                .where(*base)
-                .group_by(Member.member_type)
-            )
-        ).all()
-    )
-    admins = (
-        await session.execute(
-            select(func.count(func.distinct(Member.id)))
-            .join(MemberRoleAssignment, MemberRoleAssignment.member_id == Member.id)
-            .join(Role, Role.id == MemberRoleAssignment.role_id)
-            .where(*base, func.upper(Role.name).in_(ADMIN_ROLE_NAMES))
-        )
-    ).scalar() or 0
-    total = sum(by_status.values())
-    active = by_status.get(MembershipStatus.ACTIVE, 0)
-    suspended = (
-        await session.execute(
-            select(func.count(Member.id))
-            .join(User, User.id == Member.user_id)
-            .where(*base, User.status == AccountStatus.SUSPENDED)
-        )
-    ).scalar() or 0
-    return {
-        "totalMembers": total,
-        "activeMembers": active,
-        "inactiveMembers": max(0, total - active - suspended),
-        "suspendedMembers": suspended,
-        "admins": admins,
-        "visitors": by_type.get(MemberType.VISITOR, 0),
-        "children": by_type.get(MemberType.CHILD, 0),
-    }
+    return await _compute_church_member_stats(session, actor.church_id)
 
 
 @router.get("/members/{user_id}")
@@ -451,12 +509,21 @@ async def get_member_details(
         except Exception:
             mem_code = ""
     roles = (await role_names_for_members(session, [member.id])).get(member.id, [])
+    church = await session.get(Church, actor.church_id)
+    profile_meta = dict(
+        ((church.metadata_json if church else None) or {})
+        .get("member_profiles", {})
+        .get(str(member.id), {})
+    )
+
     def one(model):
         return select(model).where(model.member_id == member.id)
+
     md = (await session.execute(one(MemberDetails))).scalar_one_or_none()
     vol = (await session.execute(one(VolunteerDetails))).scalar_one_or_none()
     staff = (await session.execute(one(StaffDetails))).scalar_one_or_none()
     pastor = (await session.execute(one(PastorDetails))).scalar_one_or_none()
+    bishop = (await session.execute(one(BishopDetails))).scalar_one_or_none()
     admin_d = (await session.execute(one(AdminDetails))).scalar_one_or_none()
     visitor = (await session.execute(one(VisitorDetails))).scalar_one_or_none()
     contacts = (
@@ -476,6 +543,301 @@ async def get_member_details(
             .where(Guardian.child_member_id == member.id)
         )
     ).all()
+
+    # Fetch member's departments & small groups
+    dept_rows = (
+        await session.execute(
+            select(Department, DepartmentMember)
+            .join(DepartmentMember, DepartmentMember.department_id == Department.id)
+            .where(
+                DepartmentMember.member_id == member.id,
+                Department.church_id == actor.church_id,
+            )
+            .order_by(Department.name)
+        )
+    ).all()
+    dept_objs = [
+        {
+            "_id": str(d.id),
+            "id": str(d.id),
+            "departmentName": d.name,
+            "name": d.name,
+            "joinedAt": _iso(dm.created_at),
+        }
+        for d, dm in dept_rows
+    ]
+
+    group_rows = (
+        await session.execute(
+            select(Group, GroupMember)
+            .join(GroupMember, GroupMember.group_id == Group.id)
+            .where(
+                GroupMember.member_id == member.id,
+                Group.church_id == actor.church_id,
+            )
+            .order_by(Group.name)
+        )
+    ).all()
+    group_objs = [
+        {
+            "_id": str(g.id),
+            "id": str(g.id),
+            "groupName": g.name,
+            "name": g.name,
+            "joinedAt": _iso(gm.joined_at),
+        }
+        for g, gm in group_rows
+    ]
+
+    # Pastor assigned branches
+    assigned_pastor_branches = []
+    if pastor:
+        pa_rows = (
+            await session.execute(
+                select(Branch)
+                .join(PastorAssignment, PastorAssignment.branch_id == Branch.id)
+                .where(
+                    PastorAssignment.pastor_details_id == pastor.id,
+                    PastorAssignment.is_active.is_(True),
+                )
+            )
+        ).scalars().all()
+        assigned_pastor_branches = [
+            {
+                "_id": str(b.id),
+                "id": str(b.id),
+                "branchName": b.name,
+                "name": b.name,
+            }
+            for b in pa_rows
+        ]
+    if not assigned_pastor_branches and branch:
+        assigned_pastor_branches = [
+            {
+                "_id": str(branch.id),
+                "id": str(branch.id),
+                "branchName": branch.name,
+                "name": branch.name,
+            }
+        ]
+
+    # Build 6-month window for Giving & Attendance analytics
+    now_dt = _now()
+    month_keys: List[Tuple[int, int, str]] = []
+    for offset in range(5, -1, -1):
+        m_num = now_dt.month - offset
+        y_num = now_dt.year
+        while m_num <= 0:
+            m_num += 12
+            y_num -= 1
+        label = datetime(y_num, m_num, 1).strftime("%b")
+        month_keys.append((y_num, m_num, label))
+
+    # Member Offerings
+    offering_rows = (
+        await session.execute(
+            select(Offering, Fund)
+            .outerjoin(Fund, Fund.id == Offering.fund_id)
+            .where(
+                Offering.church_id == actor.church_id,
+                Offering.member_id == member.id,
+                Offering.deleted_at.is_(None),
+            )
+            .order_by(Offering.received_at.desc())
+        )
+    ).all()
+    total_giving = round(
+        sum(float(o.amount or 0) for o, _ in offering_rows), 2
+    )
+    giving_by_ym: Dict[Tuple[int, int], float] = {
+        (y, m): 0.0 for y, m, _ in month_keys
+    }
+    for o, _ in offering_rows:
+        dt = o.received_at or o.created_at
+        if dt:
+            ym = (dt.year, dt.month)
+            if ym in giving_by_ym:
+                giving_by_ym[ym] = round(giving_by_ym[ym] + float(o.amount or 0), 2)
+    giving_data = [
+        {"month": label, "amount": round(giving_by_ym[(y, m)], 2)}
+        for y, m, label in month_keys
+    ]
+    six_month_giving_total = sum(d["amount"] for d in giving_data)
+    active_giving_months = sum(1 for d in giving_data if d["amount"] > 0)
+    avg_monthly_giving = (
+        round(six_month_giving_total / 6, 2)
+        if six_month_giving_total > 0
+        else round(total_giving / max(1, len(offering_rows)), 2)
+    )
+    giving_consistency_pct = (
+        round((active_giving_months / 6) * 100)
+        if six_month_giving_total > 0
+        else (100 if total_giving > 0 else 0)
+    )
+    prev_3m = sum(d["amount"] for d in giving_data[:3])
+    recent_3m = sum(d["amount"] for d in giving_data[3:])
+    if prev_3m > 0:
+        giving_growth_pct = round(((recent_3m - prev_3m) / prev_3m) * 100, 1)
+    elif recent_3m > 0:
+        giving_growth_pct = 100.0
+    else:
+        giving_growth_pct = 0.0
+
+    # Member Attendance
+    att_rows = (
+        await session.execute(
+            select(Attendance, Event)
+            .join(Event, Event.id == Attendance.event_id)
+            .where(
+                Event.church_id == actor.church_id,
+                Attendance.member_id == member.id,
+            )
+            .order_by(Attendance.checked_in_at.desc())
+        )
+    ).all()
+    church_events = (
+        await session.execute(
+            select(Event).where(
+                Event.church_id == actor.church_id,
+            )
+        )
+    ).scalars().all()
+    events_by_ym: Dict[Tuple[int, int], int] = {
+        (y, m): 0 for y, m, _ in month_keys
+    }
+    for ev in church_events:
+        dt = ev.start_time or ev.created_at
+        if dt and (dt.year, dt.month) in events_by_ym:
+            events_by_ym[(dt.year, dt.month)] += 1
+
+    att_by_ym: Dict[Tuple[int, int], int] = {
+        (y, m): 0 for y, m, _ in month_keys
+    }
+    svc_type_counts: Dict[str, int] = {}
+    attended_weeks: set[Tuple[int, int]] = set()
+    for att, ev in att_rows:
+        dt = att.checked_in_at or ev.start_time or att.created_at
+        if dt:
+            ym = (dt.year, dt.month)
+            if ym in att_by_ym:
+                att_by_ym[ym] += 1
+            iso_cal = dt.isocalendar()
+            attended_weeks.add((iso_cal[0], iso_cal[1]))
+        svc_title = (ev.name or "Sunday Service").strip()
+        svc_type_counts[svc_title] = svc_type_counts.get(svc_title, 0) + 1
+
+    attendance_data = []
+    best_month_label = "N/A"
+    best_month_pct = -1
+    for y, m, label in month_keys:
+        att_cnt = att_by_ym[(y, m)]
+        svc_cnt = max(att_cnt, events_by_ym[(y, m)], 4 if att_cnt > 0 else 0)
+        pct = round((att_cnt / svc_cnt) * 100) if svc_cnt > 0 else 0
+        attendance_data.append(
+            {
+                "month": label,
+                "attendance": pct,
+                "attended": att_cnt,
+                "services": svc_cnt,
+            }
+        )
+        if att_cnt > 0 and pct > best_month_pct:
+            best_month_pct = pct
+            best_month_label = f"{label} ({pct}%)"
+
+    services_attended = len(att_rows)
+    total_services = max(services_attended, len(church_events))
+    avg_attendance = (
+        round((services_attended / total_services) * 100)
+        if total_services > 0
+        else 0
+    )
+    # Consecutive weeks streak from most recent attended week
+    sorted_weeks = sorted(attended_weeks, reverse=True)
+    consecutive_weeks = 0
+    if sorted_weeks:
+        consecutive_weeks = 1
+        prev_y, prev_w = sorted_weeks[0]
+        for cur_y, cur_w in sorted_weeks[1:]:
+            if (prev_y == cur_y and prev_w - cur_w == 1) or (
+                prev_y - cur_y == 1 and prev_w == 1 and cur_w >= 51
+            ):
+                consecutive_weeks += 1
+                prev_y, prev_w = cur_y, cur_w
+            else:
+                break
+
+    service_preferences = [
+        {
+            "name": name,
+            "count": cnt,
+            "percentage": round((cnt / max(1, services_attended)) * 100),
+        }
+        for name, cnt in sorted(
+            svc_type_counts.items(), key=lambda x: x[1], reverse=True
+        )[:4]
+    ]
+
+    # Involvement breakdown (Departments & Small Groups + Volunteer Hours)
+    vol_hours = int(vol.hours_contributed if vol else 0)
+    palette = ["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#06b6d4"]
+    involvement_items = [d["departmentName"] for d in dept_objs] + [
+        g["groupName"] for g in group_objs
+    ]
+    involvement_data = []
+    if involvement_items:
+        base_hours = (
+            max(1, round(vol_hours / len(involvement_items)))
+            if vol_hours > 0
+            else 4
+        )
+        for idx, item_name in enumerate(involvement_items):
+            involvement_data.append(
+                {
+                    "name": item_name,
+                    "hours": base_hours,
+                    "color": palette[idx % len(palette)],
+                }
+            )
+    elif vol_hours > 0:
+        involvement_data.append(
+            {"name": "General Ministry", "hours": vol_hours, "color": palette[0]}
+        )
+
+    # Dynamic Recognitions & Leadership Roles
+    recognitions = [
+        {
+            "title": member.position or "Church Member",
+            "subtitle": f"Role: {', '.join(roles or ['MEMBER'])}",
+            "category": "role",
+        }
+    ]
+    for d in dept_objs:
+        recognitions.append(
+            {
+                "title": d["departmentName"],
+                "subtitle": "Active Department Member",
+                "category": "department",
+            }
+        )
+    for g in group_objs:
+        recognitions.append(
+            {
+                "title": g["groupName"],
+                "subtitle": "Small Group Member",
+                "category": "group",
+            }
+        )
+    if vol_hours > 0:
+        recognitions.append(
+            {
+                "title": "Faithful Volunteer",
+                "subtitle": f"{vol_hours} Volunteer Hours Contributed",
+                "category": "award",
+            }
+        )
+
+    # Combined chronological Recent Activities
     row = format_member_row(member, user, branch, roles)
     created = _iso(member.created_at) or ""
     first = contacts[0] if contacts else None
@@ -484,8 +846,66 @@ async def get_member_details(
         if md and md.membership_date
         else (_iso(member.joined_at) or created)
     )
+    activity_events: List[Dict[str, Any]] = []
+    for o, f in offering_rows[:8]:
+        dt_iso = _iso(o.received_at or o.created_at) or created
+        fund_label = f.name if f else "General Offering"
+        activity_events.append(
+            {
+                "date": dt_iso[:10],
+                "timestamp": dt_iso,
+                "activity": f"Contributed KES {float(o.amount or 0):,.0f} ({fund_label})",
+                "type": "Giving",
+            }
+        )
+    for att, ev in att_rows[:8]:
+        dt_iso = _iso(att.checked_in_at or ev.start_time or att.created_at) or created
+        activity_events.append(
+            {
+                "date": dt_iso[:10],
+                "timestamp": dt_iso,
+                "activity": f"Attended {ev.name}",
+                "type": "Attendance",
+            }
+        )
+    for d, dm in dept_rows:
+        dt_iso = _iso(dm.created_at) or created
+        activity_events.append(
+            {
+                "date": dt_iso[:10],
+                "timestamp": dt_iso,
+                "activity": f"Member of {d.name} Department",
+                "type": "Ministry",
+            }
+        )
+    for g, gm in group_rows:
+        dt_iso = _iso(gm.joined_at) or created
+        activity_events.append(
+            {
+                "date": dt_iso[:10],
+                "timestamp": dt_iso,
+                "activity": f"Joined {g.name} Small Group",
+                "type": "Service",
+            }
+        )
+    activity_events.append(
+        {
+            "date": (mem_date or created)[:10],
+            "timestamp": mem_date or created,
+            "activity": f"Joined {branch.name if branch else 'Church'} as {member.position or 'Member'}",
+            "type": "Ministry",
+        }
+    )
+    activity_events.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+
+    saved_skills = profile_meta.get("skills") or []
+    saved_notes = profile_meta.get("notes") or ""
+    marital_val = md.marital_status.value if md and md.marital_status else None
+    occupation_val = (md.occupation if md else None) or ""
+
     return {
         "id": str(member.id),
+        "_id": str(member.id),
         "membershipNumber": mem_code,
         "memberId": mem_code or str(member.id),
         "userId": str(user.id) if user else None,
@@ -498,23 +918,42 @@ async def get_member_details(
         "membershipStatus": member.status.value,
         "membershipDate": mem_date,
         "joinedAt": _iso(member.joined_at) or created,
+        "maritalStatus": marital_val,
+        "occupation": occupation_val,
+        "skills": saved_skills,
+        "notes": saved_notes,
         "householdId": member.household_id,
         "householdRole": (
             member.household_role.value if member.household_role else None
         ),
         "organizationId": str(member.church_id),
         "createdAt": created,
+        # Live analytics fields
+        "totalGiving": total_giving,
+        "averageMonthlyGiving": avg_monthly_giving,
+        "givingConsistencyPct": giving_consistency_pct,
+        "givingMonthsActive": active_giving_months,
+        "givingGrowthPct": giving_growth_pct,
+        "givingData": giving_data,
+        "averageAttendance": avg_attendance,
+        "servicesAttended": services_attended,
+        "totalServices": total_services,
+        "consecutiveWeeks": consecutive_weeks,
+        "bestMonth": best_month_label,
+        "attendanceData": attendance_data,
+        "servicePreferences": service_preferences,
+        "involvementData": involvement_data,
+        "recognitions": recognitions,
+        "recentActivities": activity_events[:15],
         "user": {
             **row["user"],
             "dateOfBirth": (
                 member.date_of_birth.isoformat() if member.date_of_birth else None
             ),
-            "maritalStatus": (
-                md.marital_status.value if md and md.marital_status else None
-            ),
-            "occupation": (md.occupation if md else None) or "",
-            "skills": [],
-            "notes": "",
+            "maritalStatus": marital_val,
+            "occupation": occupation_val,
+            "skills": saved_skills,
+            "notes": saved_notes,
         },
         "member": {
             "id": str(member.id),
@@ -583,44 +1022,66 @@ async def get_member_details(
             "membershipDate": mem_date,
             "membershipStatus": member.status.value,
             "baptismDate": _iso(md.baptism_date) if md else None,
-            "departmentIds": [],
-            "groupIds": [],
+            "maritalStatus": marital_val,
+            "occupation": occupation_val,
+            "departments": dept_objs,
+            "groups": group_objs,
+            "departmentIds": dept_objs,
+            "groupIds": group_objs,
         },
-        "volunteerDetails": (
-            {
-                "volunteerId": str(vol.id),
-                "hoursContributed": vol.hours_contributed,
-                "roles": [],
-            }
-            if vol
-            else None
-        ),
-        "staffDetails": (
-            {
-                "staffId": str(staff.id),
-                "department": staff.department or "",
-                "jobTitle": staff.job_title or "",
-                "employmentType": "FULL_TIME",
-                "startDate": _iso(staff.start_date),
-            }
-            if staff
-            else None
-        ),
+        "volunteerDetails": {
+            "volunteerId": str(vol.id) if vol else (mem_code or str(member.id)),
+            "hoursContributed": vol.hours_contributed if vol else 0,
+            "volunteerStatus": profile_meta.get("volunteerStatus") or "ACTIVE",
+            "availabilitySchedule": profile_meta.get("availabilitySchedule")
+            or {
+                "days": [],
+                "timeSlots": [],
+                "preferredTime": "",
+            },
+            "departments": dept_objs,
+            "roles": roles or ["MEMBER"],
+        },
+        "staffDetails": {
+            "staffId": str(staff.id) if staff else (mem_code or str(member.id)),
+            "department": (staff.department if staff else "") or "General",
+            "jobTitle": (staff.job_title if staff else "")
+            or (member.position or "Staff"),
+            "employmentType": profile_meta.get("employmentType") or "FULL_TIME",
+            "salary": float(profile_meta.get("salary") or 0),
+            "isActive": bool(profile_meta.get("isActive", True)),
+            "startDate": _iso(staff.start_date) if staff else created,
+            "endDate": _iso(staff.end_date) if staff else None,
+        },
         "pastorDetails": {
             "pastorId": mem_code or str(member.id),
             "ordinationDate": _iso(pastor.ordination_date) if pastor else None,
             "sermonCount": pastor.sermon_count if pastor else 0,
+            "counselingSessions": int(profile_meta.get("counselingSessions") or 0),
+            "qualifications": profile_meta.get("qualifications") or [],
+            "specializations": profile_meta.get("specializations") or [],
+            "assignedBranches": assigned_pastor_branches,
             "biography": (pastor.biography if pastor else "") or "",
+        },
+        "bishopDetails": {
+            "bishopId": mem_code or str(member.id),
+            "appointmentDate": _iso(bishop.appointment_date) if bishop else None,
+            "jurisdictionArea": (bishop.jurisdiction_area if bishop else "") or "",
+            "oversightBranches": assigned_pastor_branches,
+            "achievements": profile_meta.get("achievements") or [],
+            "biography": (bishop.biography if bishop else "") or "",
         },
         "adminDetails": {
             "adminId": mem_code or str(member.id),
             "accessLevel": (admin_d.access_level if admin_d else "BRANCH"),
-            "assignedBranches": [str(member.branch_id)],
+            "assignedBranches": assigned_pastor_branches,
+            "permissions": profile_meta.get("adminPermissions") or [],
         },
         "visitorDetails": {
             "visitDate": _iso(visitor.visit_date) if visitor else None,
             "howDidYouHear": visitor.how_did_you_hear if visitor else None,
             "followUpStatus": visitor.follow_up_status if visitor else None,
+            "followUpNotes": (visitor.follow_up_notes if visitor else "") or "",
             "interestedInMembership": (
                 visitor.interested_in_membership if visitor else False
             ),
@@ -896,6 +1357,13 @@ async def update_organization_member(
                 continue  # NOT NULL columns
             setattr(member, attr, fn(v) if (fn and v is not None) else v)
             changed.append(attr)
+    if (
+        "status" not in fields
+        and payload.memberDetails
+        and payload.memberDetails.membership_status is not None
+    ):
+        member.status = payload.memberDetails.membership_status
+        changed.append("status")
     if "email" in fields:
         member.email = payload.email.strip().lower() if payload.email else None
         changed.append("email")
@@ -921,15 +1389,24 @@ async def update_organization_member(
         changed.append("branch_id")
     if payload.roles is not None:
         await require(session, actor, "role.assign")
-        if member.id == (actor.member.id if actor.member else None):
-            raise HTTPException(
-                status_code=400, detail="You cannot change your own roles"
-            )
         roles = await resolve_roles(
             session,
             actor.church_id,
             payload.roles or default_role_names(member.member_type),
         )
+        if member.id == (actor.member.id if actor.member else None):
+            current_roles = (
+                await role_names_for_members(session, [member.id])
+            ).get(member.id, [])
+            had_admin = any(r.upper() in ADMIN_ROLE_NAMES for r in current_roles)
+            will_have_admin = any(
+                r.name.upper() in ADMIN_ROLE_NAMES for r in roles
+            )
+            if had_admin and not will_have_admin:
+                raise HTTPException(
+                    status_code=400,
+                    detail="You cannot remove your own administrator role",
+                )
         await set_member_roles(session, member.id, roles, replace=True)
         changed.append("roles")
     if payload.address:
@@ -938,9 +1415,112 @@ async def update_organization_member(
     if payload.emergencyContacts is not None:
         await _replace_emergency_contacts(session, member.id, payload.emergencyContacts)
         changed.append("emergencyContacts")
+
+    # Sync top-level maritalStatus and occupation into MemberDetails
+    md_extra: Dict[str, Any] = {}
+    if "maritalStatus" in fields and payload.maritalStatus is not None:
+        md_extra["marital_status"] = payload.maritalStatus
+    if "occupation" in fields:
+        md_extra["occupation"] = payload.occupation
+    if md_extra and payload.memberDetails is None:
+        await _upsert_detail(session, MemberDetails, member.id, md_extra, {})
+        changed.append("memberDetails")
+
+    # Sync DepartmentMember and GroupMember if departmentIds / groupIds provided
+    if payload.memberDetails is not None:
+        if payload.memberDetails.department_ids is not None:
+            want_dept_ids = {
+                str(did).strip()
+                for did in payload.memberDetails.department_ids
+                if did and str(did).strip()
+            }
+            valid_dept_ids = set(
+                (
+                    await session.execute(
+                        select(Department.id).where(
+                            Department.church_id == actor.church_id,
+                            Department.id.in_(want_dept_ids),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            ) if want_dept_ids else set()
+            existing_dms = (
+                (
+                    await session.execute(
+                        select(DepartmentMember)
+                        .join(Department, Department.id == DepartmentMember.department_id)
+                        .where(
+                            DepartmentMember.member_id == member.id,
+                            Department.church_id == actor.church_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            existing_dept_ids = {str(dm.department_id) for dm in existing_dms}
+            for dm in existing_dms:
+                if str(dm.department_id) not in valid_dept_ids:
+                    await session.delete(dm)
+            for did in valid_dept_ids - existing_dept_ids:
+                session.add(
+                    DepartmentMember(department_id=did, member_id=member.id)
+                )
+            changed.append("departments")
+
+        if payload.memberDetails.group_ids is not None:
+            want_group_ids = {
+                str(gid).strip()
+                for gid in payload.memberDetails.group_ids
+                if gid and str(gid).strip()
+            }
+            valid_group_ids = set(
+                (
+                    await session.execute(
+                        select(Group.id).where(
+                            Group.church_id == actor.church_id,
+                            Group.id.in_(want_group_ids),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            ) if want_group_ids else set()
+            existing_gms = (
+                (
+                    await session.execute(
+                        select(GroupMember)
+                        .join(Group, Group.id == GroupMember.group_id)
+                        .where(
+                            GroupMember.member_id == member.id,
+                            Group.church_id == actor.church_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            existing_group_ids = {str(gm.group_id) for gm in existing_gms}
+            for gm in existing_gms:
+                if str(gm.group_id) not in valid_group_ids:
+                    await session.delete(gm)
+            for gid in valid_group_ids - existing_group_ids:
+                session.add(GroupMember(group_id=gid, member_id=member.id))
+            changed.append("groups")
+
     detail_models = [
-        ("adminDetails", AdminDetails, {}),
-        ("staffDetails", StaffDetails, {}),
+        ("adminDetails", AdminDetails, {"access_level": "BRANCH"}),
+        (
+            "staffDetails",
+            StaffDetails,
+            {
+                "job_title": member.position or "Staff",
+                "department": "General",
+                "start_date": _now(),
+            },
+        ),
         ("volunteerDetails", VolunteerDetails, {}),
         ("memberDetails", MemberDetails, {}),
         ("visitorDetails", VisitorDetails, {"visit_date": _now()}),
@@ -951,12 +1531,79 @@ async def update_organization_member(
         d = getattr(payload, key)
         if d is not None:
             data = d.model_dump(exclude_unset=True)
+            if key == "memberDetails" and md_extra:
+                data.update(md_extra)
+            if key == "staffDetails":
+                has_staff_info = bool(
+                    (data.get("job_title") or "").strip()
+                    or (data.get("department") or "").strip()
+                )
+                existing_staff = (
+                    await session.execute(
+                        select(StaffDetails.id).where(
+                            StaffDetails.member_id == member.id
+                        )
+                    )
+                ).first()
+                if not has_staff_info and not existing_staff:
+                    continue
+                if not (data.get("job_title") or "").strip():
+                    data["job_title"] = member.position or "Staff"
+                if not (data.get("department") or "").strip():
+                    data["department"] = "General"
+                if not data.get("start_date"):
+                    data["start_date"] = _now()
             if data.get("invited_by_member_id"):
                 await _check_members_in_church(
                     session, [data["invited_by_member_id"]], actor.church_id
                 )
             await _upsert_detail(session, model, member.id, data, defaults)
             changed.append(key)
+
+    # Persist skills, notes, and extended profile metadata on Church.metadata_json
+    church = await session.get(Church, actor.church_id)
+    if church:
+        meta = dict(church.metadata_json or {})
+        profiles = dict(meta.get("member_profiles") or {})
+        p_meta = dict(profiles.get(str(member.id)) or {})
+        if "skills" in fields and payload.skills is not None:
+            p_meta["skills"] = [
+                str(s).strip() for s in payload.skills if s and str(s).strip()
+            ]
+        if "notes" in fields and payload.notes is not None:
+            p_meta["notes"] = payload.notes
+        if payload.volunteerDetails:
+            if payload.volunteerDetails.volunteer_status:
+                p_meta["volunteerStatus"] = payload.volunteerDetails.volunteer_status
+            if payload.volunteerDetails.availability_schedule is not None:
+                p_meta["availabilitySchedule"] = (
+                    payload.volunteerDetails.availability_schedule
+                )
+        if payload.staffDetails:
+            if payload.staffDetails.employment_type:
+                p_meta["employmentType"] = payload.staffDetails.employment_type
+            if payload.staffDetails.salary is not None:
+                p_meta["salary"] = float(payload.staffDetails.salary)
+            if payload.staffDetails.is_active is not None:
+                p_meta["isActive"] = bool(payload.staffDetails.is_active)
+        if payload.pastorDetails:
+            if payload.pastorDetails.counseling_sessions is not None:
+                p_meta["counselingSessions"] = int(
+                    payload.pastorDetails.counseling_sessions
+                )
+            if payload.pastorDetails.qualifications is not None:
+                p_meta["qualifications"] = payload.pastorDetails.qualifications
+            if payload.pastorDetails.specializations is not None:
+                p_meta["specializations"] = payload.pastorDetails.specializations
+        if payload.bishopDetails and payload.bishopDetails.achievements is not None:
+            p_meta["achievements"] = payload.bishopDetails.achievements
+        if payload.adminDetails and payload.adminDetails.permissions is not None:
+            p_meta["adminPermissions"] = payload.adminDetails.permissions
+        profiles[str(member.id)] = p_meta
+        meta["member_profiles"] = profiles
+        church.metadata_json = meta
+        flag_modified(church, "metadata_json")
+
     try:
         await session.commit()
     except IntegrityError:
@@ -982,6 +1629,69 @@ async def update_organization_member(
             "userId": str(user.id) if user else None,
             "name": member.full_name,
             "email": (user.email if user else member.email) or "",
+        },
+    }
+
+
+@router.patch("/members/{user_id}/role")
+@router.patch("/users/{user_id}/role")
+async def patch_organization_member_role(
+    user_id: str,
+    payload: Dict[str, Any],
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: CurrentUser,
+    session: DbSession,
+    organizationId: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, organizationId)
+    )
+    member, user, _ = await _member_in_church(session, user_id, actor.church_id)
+    await require(session, actor, "role.assign")
+    raw_roles = (
+        payload.get("roles")
+        or payload.get("role")
+        or payload.get("newRole")
+        or ["MEMBER"]
+    )
+    if isinstance(raw_roles, str):
+        raw_roles = [raw_roles]
+    roles = await resolve_roles(session, actor.church_id, raw_roles)
+    if member.id == (actor.member.id if actor.member else None):
+        current_roles = (
+            await role_names_for_members(session, [member.id])
+        ).get(member.id, [])
+        had_admin = any(r.upper() in ADMIN_ROLE_NAMES for r in current_roles)
+        will_have_admin = any(r.name.upper() in ADMIN_ROLE_NAMES for r in roles)
+        if had_admin and not will_have_admin:
+            raise HTTPException(
+                status_code=400,
+                detail="You cannot remove your own administrator role",
+            )
+    await set_member_roles(session, member.id, roles, replace=True)
+    await session.commit()
+    role_names = [r.name for r in roles]
+    queue_audit(
+        background_tasks,
+        request,
+        "UPDATE_MEMBER_ROLE",
+        "MEMBER",
+        member.id,
+        actor_user_id=current_user.id,
+        church_id=actor.church_id,
+        metadata_json={"roles": role_names},
+    )
+    return {
+        "success": True,
+        "message": "Member role updated successfully",
+        "user": {
+            "id": str(user.id) if user else str(member.id),
+            "name": member.full_name,
+            "email": (user.email if user else member.email) or "",
+            "role": role_names[0] if role_names else "MEMBER",
+            "roles": role_names,
+            "updatedAt": _iso(_now()) or "",
         },
     }
 
@@ -1091,8 +1801,21 @@ async def _set_branch_pastor(
         a.end_date = now
     if not pastor_member_id:
         return
-    await _check_members_in_church(session, [pastor_member_id], church_id)
-    details = await _upsert_detail(session, PastorDetails, pastor_member_id, {})
+    resolved_member_id = (
+        await session.execute(
+            select(Member.id).where(
+                Member.church_id == church_id,
+                Member.deleted_at.is_(None),
+                or_(Member.id == pastor_member_id, Member.user_id == pastor_member_id),
+            )
+        )
+    ).scalar_one_or_none()
+    if not resolved_member_id:
+        raise HTTPException(
+            status_code=400,
+            detail="One or more referenced members do not belong to this church",
+        )
+    details = await _upsert_detail(session, PastorDetails, str(resolved_member_id), {})
     await session.flush()
     session.add(
         PastorAssignment(
@@ -1114,6 +1837,7 @@ def format_branch_response(
     pastor = pastor or {}
     p_first, p_last = pastor.get("first", "Resident"), pastor.get("last", "Pastor")
     pastor_name = f"{p_first} {p_last}".strip()
+    meta = dict(b.metadata_json or {})
     addresses = []
     if address:
         addresses.append(
@@ -1132,26 +1856,29 @@ def format_branch_response(
         "_id": str(b.id),
         "name": b.name,
         "branchName": b.name,
+        "description": meta.get("description") or "",
         "organizationId": str(b.church_id),
         "churchId": str(b.church_id),
         "memberCount": member_count,
         "members": member_count,
         "capacity": b.capacity or 500,
+        "growth": int(meta.get("growth", 0) or 0),
         "email": b.email or "",
         "phone": b.phone_number or "",
         "phoneNumber": b.phone_number or "",
         "isActive": b.is_active,
         "isDeleted": b.is_deleted,
-        "establishedDate": _iso(b.created_at) or "",
+        "establishedDate": meta.get("establishedDate") or _iso(b.created_at) or "",
         "createdAt": _iso(b.created_at) or "",
         "updatedAt": _iso(b.updated_at) or "",
         "_count": {"teammembers": member_count, "members": member_count},
         "pastorId": {
-            "id": pastor.get("id", ""),
-            "_id": pastor.get("id", ""),
+            "id": str(pastor.get("id", "")),
+            "_id": str(pastor.get("id", "")),
             "firstName": p_first,
             "lastName": p_last,
             "name": pastor_name,
+            "email": pastor.get("email", ""),
         },
         "teammembers": [],
         "address": addresses,
@@ -1183,6 +1910,91 @@ async def _branch_payload(session, branch: Branch) -> dict:
     return format_branch_response(branch, count, addr, pastor)
 
 
+def _compute_branches_analytics(all_branches: List[Branch], counts: Dict[str, int]) -> Dict[str, Any]:
+    palette = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"]
+    total_branches = len(all_branches)
+    active_branches = sum(1 for b in all_branches if b.is_active)
+    total_members = sum(counts.get(str(b.id), 0) for b in all_branches)
+    total_capacity = sum((b.capacity or 500) for b in all_branches)
+    capacity_utilization = (
+        round((total_members / total_capacity) * 100) if total_capacity > 0 else 0
+    )
+    seats_available = max(total_capacity - total_members, 0)
+
+    growth_vals = []
+    branch_distribution = []
+    attendance_series = []
+    branch_avg_attendance: Dict[str, int] = {}
+
+    for idx, b in enumerate(all_branches):
+        b_id = str(b.id)
+        m_count = counts.get(b_id, 0)
+        color = palette[idx % len(palette)]
+        meta = dict(b.metadata_json or {})
+        schedules = _extract_branch_schedules(b)
+        sched_att = (
+            round(sum(int(s.get("attendance") or 0) for s in schedules) / len(schedules))
+            if schedules
+            else m_count
+        )
+        branch_avg_attendance[f"b_{idx}"] = sched_att if sched_att > 0 else m_count
+
+        if "growth" in meta and meta.get("growth") is not None:
+            g_val = int(meta.get("growth") or 0)
+        else:
+            cap = b.capacity or 500
+            g_val = round((m_count / cap) * 20) if cap > 0 and m_count > 0 else 0
+        growth_vals.append(g_val)
+
+        branch_distribution.append(
+            {
+                "name": b.name,
+                "value": m_count,
+                "color": color,
+            }
+        )
+        attendance_series.append(
+            {
+                "key": f"b_{idx}",
+                "branchId": b_id,
+                "label": b.name,
+                "color": color,
+            }
+        )
+
+    avg_growth = round(sum(growth_vals) / len(growth_vals)) if growth_vals else 0
+
+    now = _now()
+    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    factors = [0.85, 0.88, 0.92, 0.95, 0.98, 1.0]
+    attendance_data = []
+    for m_offset, factor in enumerate(factors):
+        m_idx = (now.month - 1 - (5 - m_offset)) % 12
+        row: Dict[str, Any] = {"month": month_names[m_idx], "total": 0}
+        total_m = 0
+        for s in attendance_series:
+            key = s["key"]
+            base_att = branch_avg_attendance.get(key, 0)
+            val = round(base_att * factor)
+            row[key] = val
+            total_m += val
+        row["total"] = total_m
+        attendance_data.append(row)
+
+    return {
+        "totalBranches": total_branches,
+        "activeBranches": active_branches,
+        "totalMembers": total_members,
+        "totalCapacity": total_capacity,
+        "capacityUtilization": capacity_utilization,
+        "seatsAvailable": seats_available,
+        "averageGrowth": avg_growth,
+        "branchDistribution": branch_distribution,
+        "attendanceSeries": attendance_series,
+        "attendanceData": attendance_data,
+    }
+
+
 @router.get("/teams")
 @router.get("/branches")
 async def get_organization_teams(
@@ -1193,13 +2005,38 @@ async def get_organization_teams(
     page: int = Query(1, ge=1),
     pageSize: int = Query(50, ge=1, le=200),
     search: str = Query(""),
+    status: Optional[str] = Query(None),
 ):
     actor = await authorize(
         session, current_user, church_id_from(request, organizationId), "branch.read"
     )
-    conds = [Branch.church_id == actor.church_id, Branch.deleted_at.is_(None)]
+    base_conds = [Branch.church_id == actor.church_id, Branch.deleted_at.is_(None)]
+    all_church_branches = (
+        (
+            await session.execute(
+                select(Branch)
+                .where(*base_conds)
+                .order_by(Branch.created_at.asc(), Branch.name.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    counts = await _member_counts(session, actor.church_id)
+    analytics = _compute_branches_analytics(all_church_branches, counts)
+
+    conds = list(base_conds)
     if search:
         conds.append(Branch.name.ilike(f"%{search.strip()}%"))
+    if status and status.lower() != "all":
+        st_lower = status.strip().lower()
+        if st_lower == "active":
+            conds.append(Branch.is_active.is_(True))
+        elif st_lower == "inactive":
+            conds.append(Branch.is_active.is_(False))
+        elif st_lower == "growing":
+            conds.append(Branch.is_active.is_(True))
+
     total = (
         await session.execute(select(func.count(Branch.id)).where(*conds))
     ).scalar() or 0
@@ -1216,7 +2053,6 @@ async def get_organization_teams(
         .scalars()
         .all()
     )
-    counts = await _member_counts(session, actor.church_id)
     pastors = await _pastors_for(session, [b.id for b in branches])
     addr_ids = [b.address_id for b in branches if b.address_id]
     addrs = (
@@ -1237,9 +2073,13 @@ async def get_organization_teams(
         )
         for b in branches
     ]
+    if status and status.strip().lower() == "growing":
+        items = [it for it in items if (it.get("memberCount", 0) > 0 or it.get("growth", 0) > 0)]
+        total = len(items)
     return {
         "teams": items,
         "branches": items,
+        "analytics": analytics,
         "pagination": _pagination(total, page, pageSize),
     }
 
@@ -1289,13 +2129,19 @@ async def create_organization_team(
         church_id_from(request, payload.organizationId),
         "branch.create",
     )
+    meta: Dict[str, Any] = {}
+    if payload.description is not None:
+        meta["description"] = payload.description.strip()
+    if payload.establishedDate is not None:
+        meta["establishedDate"] = payload.establishedDate
     branch = Branch(
         name=(payload.name or payload.branchName).strip(),
         church_id=actor.church_id,
         email=payload.email,
         phone_number=payload.phoneNumber or payload.phone,
         capacity=payload.capacity if payload.capacity is not None else 500,
-        is_active=True,
+        is_active=payload.isActive if payload.isActive is not None else True,
+        metadata_json=meta,
     )
     session.add(branch)
     await session.flush()
@@ -1358,8 +2204,23 @@ async def update_organization_branch_by_id(
         branch.phone_number = payload.phoneNumber or payload.phone
     if payload.capacity is not None:
         branch.capacity = payload.capacity
-    if payload.status is not None:
+    if payload.isActive is not None:
+        branch.is_active = payload.isActive
+    elif payload.status is not None:
         branch.is_active = payload.status.strip().lower() == "active"
+
+    meta = dict(branch.metadata_json or {})
+    meta_changed = False
+    if "description" in fields:
+        meta["description"] = (payload.description or "").strip()
+        meta_changed = True
+    if "establishedDate" in fields and payload.establishedDate is not None:
+        meta["establishedDate"] = payload.establishedDate
+        meta_changed = True
+    if meta_changed:
+        branch.metadata_json = meta
+        flag_modified(branch, "metadata_json")
+
     if payload.address:
         addr = (
             await session.get(Address, branch.address_id) if branch.address_id else None
@@ -1574,7 +2435,9 @@ async def get_branch_departments(
     limit: int = Query(10, ge=1),
     search: str = Query(""),
 ):
-    """Departments are church-wide; they are shown under each branch."""
+    """Departments are church-wide or branch-specific; shown under each branch."""
+    from app.routers.departments import _parse_dept_desc
+
     branch, _ = await _branch_actor(
         session, request, current_user, branch_id, "branch.read"
     )
@@ -1603,32 +2466,127 @@ async def get_branch_departments(
             )
         ).all()
     )
-    items = [
-        {
-            "id": str(d.id),
-            "_id": str(d.id),
-            "name": d.name,
-            "description": d.description or "",
-            "isActive": d.is_active,
-            "branchId": str(branch.id),
-            "churchId": str(branch.church_id),
-            "createdAt": _iso(d.created_at) or "",
-            "updatedAt": _iso(d.updated_at) or "",
-            "memberCount": counts.get(d.id, 0),
-            "_count": {"members": counts.get(d.id, 0)},
-        }
-        for d in departments
-    ]
+    items = []
+    for d in departments:
+        clean_desc, meta = _parse_dept_desc(d.description)
+        dept_branch_id = meta.get("branchId")
+        if dept_branch_id and str(dept_branch_id) != str(branch.id):
+            continue
+        m_count = counts.get(d.id, 0)
+        budget_items = meta.get("budgetCategories", meta.get("budget", []))
+        total_budget = (
+            sum(float(b.get("allocatedAmount", 0)) for b in budget_items)
+            if budget_items
+            else float(meta.get("totalBudget", 0))
+        )
+        leader = None
+        if d.leader_member_id:
+            mem = await session.get(Member, d.leader_member_id)
+            if mem:
+                leader = {
+                    "_id": str(mem.id),
+                    "id": str(mem.id),
+                    "firstName": mem.first_name,
+                    "lastName": mem.last_name,
+                    "email": mem.email or "",
+                    "phoneNumber": mem.phone_number or "",
+                }
+        items.append(
+            {
+                "id": str(d.id),
+                "_id": str(d.id),
+                "name": d.name,
+                "departmentName": d.name,
+                "description": clean_desc,
+                "category": meta.get("category", "ministry"),
+                "location": meta.get("location", branch.name or "Main Sanctuary"),
+                "meetingDay": meta.get("meetingDay", []),
+                "meetingTime": meta.get("meetingTime", []),
+                "totalBudget": total_budget,
+                "leaderId": leader,
+                "isActive": d.is_active,
+                "branchId": str(dept_branch_id or branch.id),
+                "churchId": str(branch.church_id),
+                "createdAt": _iso(d.created_at) or "",
+                "updatedAt": _iso(d.updated_at) or "",
+                "memberCount": m_count,
+                "_count": {"members": m_count},
+            }
+        )
+    total = len(items)
+    offset = (page - 1) * limit
+    paginated = items[offset : offset + limit]
     return {
-        "departments": items,
-        "pagination": {
-            "total": len(items),
-            "page": page,
-            "limit": limit,
-            "totalPages": 1,
-            "hasMore": False,
-        },
+        "departments": paginated,
+        "pagination": _pagination(total, page, limit),
     }
+
+
+async def _resolve_facilitator(
+    session, raw_facilitator: Any, church_id: str
+) -> Optional[Dict[str, Any]]:
+    if not raw_facilitator:
+        return None
+    if isinstance(raw_facilitator, dict):
+        fid = raw_facilitator.get("_id") or raw_facilitator.get("id") or ""
+        if raw_facilitator.get("firstName"):
+            return {
+                "_id": str(fid),
+                "id": str(fid),
+                "firstName": raw_facilitator.get("firstName", ""),
+                "lastName": raw_facilitator.get("lastName", ""),
+                "email": raw_facilitator.get("email", ""),
+                "phoneNumber": raw_facilitator.get("phoneNumber", ""),
+            }
+        raw_facilitator = fid
+    if isinstance(raw_facilitator, str) and raw_facilitator.strip():
+        target = raw_facilitator.strip()
+        m = (
+            await session.execute(
+                select(Member).where(
+                    Member.church_id == church_id,
+                    Member.deleted_at.is_(None),
+                    or_(Member.id == target, Member.user_id == target),
+                )
+            )
+        ).scalars().first()
+        if m:
+            return {
+                "_id": str(m.id),
+                "id": str(m.id),
+                "firstName": m.first_name,
+                "lastName": m.last_name,
+                "email": m.email or "",
+                "phoneNumber": m.phone_number or "",
+            }
+        u = await session.get(User, target)
+        if u:
+            parts = (u.full_name or u.email or "Facilitator").split(" ", 1)
+            return {
+                "_id": str(u.id),
+                "id": str(u.id),
+                "firstName": parts[0],
+                "lastName": parts[1] if len(parts) > 1 else "",
+                "email": u.email or "",
+                "phoneNumber": u.phone or "",
+            }
+    return None
+
+
+def _normalize_stored_facilitator(fac: Any) -> Optional[Dict[str, Any]]:
+    if not fac:
+        return None
+    if isinstance(fac, dict) and fac.get("firstName"):
+        fid = str(fac.get("_id") or fac.get("id") or "")
+        return {
+            "_id": fid,
+            "id": fid,
+            "firstName": fac.get("firstName", ""),
+            "lastName": fac.get("lastName", ""),
+            "email": fac.get("email", ""),
+            "phoneNumber": fac.get("phoneNumber", ""),
+        }
+    return None
 
 
 def _extract_branch_schedules(branch: Branch) -> List[Dict[str, Any]]:
@@ -1654,6 +2612,7 @@ def _extract_branch_schedules(branch: Branch) -> List[Dict[str, Any]]:
                     "attendance": int(s.get("attendance") or 100),
                     "duration": int(s.get("duration") or 90),
                     "location": s.get("location") or branch.name or "Main Sanctuary",
+                    "facilitator": _normalize_stored_facilitator(s.get("facilitator")),
                     "recurring": bool(s.get("recurring", True)),
                     "isActive": bool(s.get("isActive", True)),
                     "churchId": str(branch.church_id),
@@ -1688,6 +2647,7 @@ def _extract_branch_schedules(branch: Branch) -> List[Dict[str, Any]]:
                 "attendance": int(branch.capacity or 200),
                 "duration": 90,
                 "location": branch.name or "Main Sanctuary",
+                "facilitator": None,
                 "recurring": True,
                 "isActive": True,
                 "churchId": str(branch.church_id),
@@ -1731,6 +2691,7 @@ def _extract_branch_activities(branch: Branch) -> List[Dict[str, Any]]:
                 "startTime": a.get("startTime") or "09:00",
                 "endTime": a.get("endTime") or "11:00",
                 "location": a.get("location") or branch.name or "Main Hall",
+                "facilitator": _normalize_stored_facilitator(a.get("facilitator")),
                 "budget": float(a.get("budget") or 0),
                 "description": a.get("description") or "",
                 "createdAt": a.get("createdAt") or _iso(branch.created_at) or "",
@@ -1808,6 +2769,30 @@ async def get_all_service_schedules(
     all_schedules: List[Dict[str, Any]] = []
     for b in branches:
         all_schedules.extend(_extract_branch_schedules(b))
+    if not all_schedules and not branchId:
+        all_schedules = [
+            {
+                "id": f"{actor.church_id}-0",
+                "_id": f"{actor.church_id}-0",
+                "name": "Sunday Morning Service",
+                "service": "Sunday Morning Service",
+                "day": "sunday",
+                "time": "09:00",
+                "type": "worship",
+                "attendance": 200,
+                "duration": 120,
+                "location": "Main Sanctuary",
+                "recurring": True,
+                "isActive": True,
+                "churchId": str(actor.church_id),
+                "branchId": {
+                    "_id": str(actor.church_id),
+                    "id": str(actor.church_id),
+                    "branchName": "Main Campus",
+                    "name": "Main Campus",
+                },
+            }
+        ]
     if search:
         s = search.lower()
         all_schedules = [
@@ -1903,6 +2888,7 @@ async def create_branch_service_schedule(
     schedules = _extract_branch_schedules(branch)
     sid = str(uuid.uuid4())
     svc_name = (payload.get("service") or payload.get("name") or "Sunday Service").strip()
+    facilitator = await _resolve_facilitator(session, payload.get("facilitator"), str(branch.church_id))
     new_item = {
         "id": sid,
         "_id": sid,
@@ -1914,7 +2900,7 @@ async def create_branch_service_schedule(
         "attendance": int(float(payload.get("attendance") or 100)),
         "duration": int(float(payload.get("duration") or 90)),
         "location": payload.get("location") or branch.name or "Main Sanctuary",
-        "facilitator": payload.get("facilitator"),
+        "facilitator": facilitator,
         "recurring": bool(payload.get("recurring", True)),
         "isActive": bool(payload.get("isActive", True)),
         "startDate": payload.get("startDate"),
@@ -1986,9 +2972,13 @@ async def update_branch_service_schedule(
                 svc_name = (payload.get("service") or payload.get("name") or item["service"]).strip()
                 item["service"] = svc_name
                 item["name"] = svc_name
-            for field in ("day", "time", "type", "location", "facilitator", "startDate", "endDate", "notes"):
+            for field in ("day", "time", "type", "location", "startDate", "endDate", "notes"):
                 if field in payload and payload[field] is not None:
                     item[field] = payload[field]
+            if "facilitator" in payload:
+                item["facilitator"] = await _resolve_facilitator(
+                    session, payload.get("facilitator"), str(branch.church_id)
+                )
             if "attendance" in payload and payload["attendance"] is not None:
                 item["attendance"] = int(float(payload["attendance"]))
             if "duration" in payload and payload["duration"] is not None:
@@ -2139,6 +3129,7 @@ async def create_branch_activity(
     )
     activities = _extract_branch_activities(branch)
     aid = str(uuid.uuid4())
+    facilitator = await _resolve_facilitator(session, payload.get("facilitator"), str(branch.church_id))
     new_act = {
         "id": aid,
         "_id": aid,
@@ -2152,7 +3143,7 @@ async def create_branch_activity(
         "startTime": payload.get("startTime") or "09:00",
         "endTime": payload.get("endTime") or "11:00",
         "location": payload.get("location") or branch.name or "Main Hall",
-        "facilitator": payload.get("facilitator"),
+        "facilitator": facilitator,
         "budget": float(payload.get("budget") or 0),
         "description": payload.get("description") or "",
         "createdAt": _iso(_now()),
@@ -2211,9 +3202,13 @@ async def update_branch_activity(
     updated_act = None
     for a in activities:
         if a.get("id") == activity_id or a.get("_id") == activity_id:
-            for field in ("activity", "date", "type", "status", "startTime", "endTime", "location", "facilitator", "description"):
+            for field in ("activity", "date", "type", "status", "startTime", "endTime", "location", "description"):
                 if field in payload and payload[field] is not None:
                     a[field] = payload[field]
+            if "facilitator" in payload:
+                a["facilitator"] = await _resolve_facilitator(
+                    session, payload.get("facilitator"), str(branch.church_id)
+                )
             if "participants" in payload and payload["participants"] is not None:
                 a["participants"] = int(float(payload["participants"]))
             if "budget" in payload and payload["budget"] is not None:
@@ -3941,4 +4936,1037 @@ async def assign_church_role_to_members(
         "success": True,
         "message": f"Role '{_format_role_display_name(eff_role.name)}' assignments updated",
     }
+
+
+def _relative_time_label(dt: Optional[datetime], now: datetime) -> str:
+    if not dt:
+        return "Recently"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    diff_sec = max(0, int((now - dt).total_seconds()))
+    if diff_sec < 60:
+        return "Just now"
+    if diff_sec < 3600:
+        return f"{diff_sec // 60}m ago"
+    if diff_sec < 86400:
+        return f"{diff_sec // 3600}h ago"
+    days = diff_sec // 86400
+    if days < 30:
+        return f"{days}d ago"
+    return dt.strftime("%b %d")
+
+
+def _format_pct_change(curr: float, prev: float) -> Tuple[str, str]:
+    if prev > 0:
+        pct = round(((curr - prev) / prev) * 100)
+        return (f"+{pct}%" if pct >= 0 else f"{pct}%"), ("up" if pct >= 0 else "down")
+    if curr > 0:
+        return "+100%", "up"
+    return "0%", "up"
+
+
+@router.get("/dashboard")
+async def get_church_dashboard_overview(
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+    organizationId: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, organizationId)
+    )
+    church_id = actor.church_id
+    church = await session.get(Church, church_id)
+    now = _now()
+    thirty_days_ago = now - timedelta(days=30)
+    sixty_days_ago = now - timedelta(days=60)
+    seven_days_ago = now - timedelta(days=7)
+    fourteen_days_ago = now - timedelta(days=14)
+
+    # 1. Members & New Members
+    members = (
+        await session.execute(
+            select(Member)
+            .where(Member.church_id == church_id, Member.deleted_at.is_(None))
+            .order_by(Member.created_at.desc())
+        )
+    ).scalars().all()
+    total_members = len(members)
+    new_members_30d = 0
+    new_members_prev_30d = 0
+    for m in members:
+        c_dt = m.created_at
+        if c_dt:
+            if c_dt.tzinfo is None:
+                c_dt = c_dt.replace(tzinfo=timezone.utc)
+            if c_dt >= thirty_days_ago:
+                new_members_30d += 1
+            elif c_dt >= sixty_days_ago:
+                new_members_prev_30d += 1
+    member_change, member_trend = _format_pct_change(
+        float(new_members_30d), float(new_members_prev_30d)
+    )
+
+    # 2. Events & Attendance
+    events = (
+        await session.execute(
+            select(Event)
+            .where(Event.church_id == church_id)
+            .order_by(Event.start_time.asc())
+        )
+    ).scalars().all()
+    active_events = [
+        ev for ev in events if ev.status == EventStatus.ACTIVE
+    ]
+    new_events_30d = sum(
+        1
+        for ev in active_events
+        if ev.created_at
+        and (
+            ev.created_at.replace(tzinfo=timezone.utc)
+            if ev.created_at.tzinfo is None
+            else ev.created_at
+        )
+        >= thirty_days_ago
+    )
+
+    att_rows = (
+        await session.execute(
+            select(Attendance, Event)
+            .join(Event, Event.id == Attendance.event_id)
+            .where(Event.church_id == church_id)
+            .order_by(Attendance.checked_in_at.desc())
+        )
+    ).all()
+    att_by_event: Dict[str, int] = {}
+    att_last_7d = 0
+    att_prev_7d = 0
+    # 4 weekly buckets: Week 1 (21-28d ago), Week 2 (14-21d ago), Week 3 (7-14d ago), Week 4 (0-7d ago)
+    week_counts = [0, 0, 0, 0]
+    for att, ev in att_rows:
+        eid = str(ev.id)
+        att_by_event[eid] = att_by_event.get(eid, 0) + 1
+        dt = att.checked_in_at or ev.start_time or att.created_at
+        if dt:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt >= seven_days_ago:
+                att_last_7d += 1
+                week_counts[3] += 1
+            elif dt >= fourteen_days_ago:
+                att_prev_7d += 1
+                week_counts[2] += 1
+            elif dt >= now - timedelta(days=21):
+                week_counts[1] += 1
+            elif dt >= now - timedelta(days=28):
+                week_counts[0] += 1
+
+    weekly_attendance_val = att_last_7d if att_last_7d > 0 else len(att_rows)
+    att_change, att_trend = _format_pct_change(
+        float(att_last_7d), float(att_prev_7d)
+    )
+
+    # 3. Offerings & Giving
+    offering_rows = (
+        await session.execute(
+            select(Offering, Fund)
+            .outerjoin(Fund, Fund.id == Offering.fund_id)
+            .where(
+                Offering.church_id == church_id,
+                Offering.deleted_at.is_(None),
+            )
+            .order_by(Offering.received_at.desc())
+        )
+    ).all()
+    giving_30d = 0.0
+    giving_prev_30d = 0.0
+    total_giving_all = 0.0
+    for o, _ in offering_rows:
+        amt = float(o.amount or 0)
+        total_giving_all += amt
+        dt = o.received_at or o.created_at
+        if dt:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt >= thirty_days_ago:
+                giving_30d += amt
+            elif dt >= sixty_days_ago:
+                giving_prev_30d += amt
+
+    monthly_giving_val = round(
+        giving_30d if giving_30d > 0 else total_giving_all, 2
+    )
+    giving_change, giving_trend = _format_pct_change(giving_30d, giving_prev_30d)
+
+    # 4. Prayer Requests & Assets for Recent Activity & Ministry Health
+    prayers = (
+        await session.execute(
+            select(PrayerRequest)
+            .where(PrayerRequest.church_id == church_id)
+            .order_by(PrayerRequest.created_at.desc())
+        )
+    ).scalars().all()
+    active_prayers = sum(
+        1 for p in prayers if p.status == PrayerStatus.ACTIVE
+    )
+    answered_prayers = sum(
+        1 for p in prayers if p.status == PrayerStatus.ANSWERED
+    )
+
+    assets = (
+        await session.execute(
+            select(Asset)
+            .where(Asset.church_id == church_id)
+            .order_by(Asset.created_at.desc())
+        )
+    ).scalars().all()
+
+    # 5. Volunteer & Ministry Engagement
+    dept_member_ids = set(
+        (
+            await session.execute(
+                select(DepartmentMember.member_id)
+                .join(Department, Department.id == DepartmentMember.department_id)
+                .where(Department.church_id == church_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    group_member_ids = set(
+        (
+            await session.execute(
+                select(GroupMember.member_id)
+                .join(Group, Group.id == GroupMember.group_id)
+                .where(Group.church_id == church_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    vol_member_ids = set(
+        (
+            await session.execute(
+                select(VolunteerDetails.member_id)
+                .join(Member, Member.id == VolunteerDetails.member_id)
+                .where(Member.church_id == church_id, Member.deleted_at.is_(None))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    staff_role_member_ids = set(
+        (
+            await session.execute(
+                select(MemberRoleAssignment.member_id)
+                .join(Role, Role.id == MemberRoleAssignment.role_id)
+                .join(Member, Member.id == MemberRoleAssignment.member_id)
+                .where(
+                    Member.church_id == church_id,
+                    Member.deleted_at.is_(None),
+                    func.upper(Role.name).in_(STAFF_AND_LEADERSHIP_ROLES),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    engaged_member_ids = (
+        dept_member_ids | group_member_ids | vol_member_ids | staff_role_member_ids
+    )
+    volunteer_engagement_pct = (
+        min(100, round((len(engaged_member_ids) / total_members) * 100))
+        if total_members > 0
+        else 0
+    )
+
+    # Giving Goal (from active pledges or church metadata or dynamic benchmark)
+    pledge_sum = float(
+        (
+            await session.execute(
+                select(func.coalesce(func.sum(Pledge.amount), 0)).where(
+                    Pledge.church_id == church_id,
+                    Pledge.deleted_at.is_(None),
+                )
+            )
+        ).scalar()
+        or 0
+    )
+    meta = dict((church.metadata_json if church else None) or {})
+    giving_goal = float(
+        meta.get("giving_goal")
+        or (pledge_sum if pledge_sum > 0 else max(50000.0, monthly_giving_val))
+    )
+    giving_goal_pct = (
+        min(100, round((monthly_giving_val / giving_goal) * 100))
+        if giving_goal > 0
+        else 0
+    )
+
+    # 6. Recent Activity Feed (chronological across modules)
+    feed: List[Dict[str, Any]] = []
+    for m in members[:4]:
+        dt = m.created_at
+        feed.append(
+            {
+                "id": f"mem-{m.id}",
+                "type": "member",
+                "title": "New member registered",
+                "description": f"{m.full_name} joined the church",
+                "timestamp": _iso(dt) or "",
+                "time": _relative_time_label(dt, now),
+                "color": "bg-green-500",
+            }
+        )
+    for ev in sorted(
+        events,
+        key=lambda x: x.created_at or x.start_time or now,
+        reverse=True,
+    )[:4]:
+        dt = ev.created_at or ev.start_time
+        feed.append(
+            {
+                "id": f"evt-{ev.id}",
+                "type": "event",
+                "title": "Event scheduled",
+                "description": f"{ev.name} ({ev.location or 'Main Sanctuary'})",
+                "timestamp": _iso(dt) or "",
+                "time": _relative_time_label(dt, now),
+                "color": "bg-blue-500",
+            }
+        )
+    for o, f in offering_rows[:4]:
+        dt = o.received_at or o.created_at
+        fname = f.name if f else "General Offering"
+        feed.append(
+            {
+                "id": f"off-{o.id}",
+                "type": "finance",
+                "title": "Offering recorded",
+                "description": f"{fname}: KES {float(o.amount or 0):,.0f}",
+                "timestamp": _iso(dt) or "",
+                "time": _relative_time_label(dt, now),
+                "color": "bg-purple-500",
+            }
+        )
+    for pr in prayers[:3]:
+        dt = pr.created_at
+        feed.append(
+            {
+                "id": f"pr-{pr.id}",
+                "type": "prayer",
+                "title": "Prayer request submitted",
+                "description": pr.title,
+                "timestamp": _iso(dt) or "",
+                "time": _relative_time_label(dt, now),
+                "color": "bg-orange-500",
+            }
+        )
+    for a in assets[:3]:
+        dt = a.created_at
+        feed.append(
+            {
+                "id": f"ast-{a.id}",
+                "type": "asset",
+                "title": "Church asset registered",
+                "description": f"{a.name} ({a.condition.value.title()})",
+                "timestamp": _iso(dt) or "",
+                "time": _relative_time_label(dt, now),
+                "color": "bg-red-500",
+            }
+        )
+    feed.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+
+    # 7. Upcoming Events list
+    events_meta = dict(meta.get("events_meta") or {})
+    upcoming_candidates = [
+        ev
+        for ev in active_events
+        if ev.start_time
+        and (
+            ev.start_time.replace(tzinfo=timezone.utc)
+            if ev.start_time.tzinfo is None
+            else ev.start_time
+        )
+        >= (now - timedelta(days=1))
+    ]
+    if not upcoming_candidates:
+        upcoming_candidates = active_events[:6]
+    upcoming_out = []
+    for ev in upcoming_candidates[:6]:
+        em = dict(events_meta.get(str(ev.id)) or {})
+        st = ev.start_time
+        if st:
+            st_utc = st.replace(tzinfo=timezone.utc) if st.tzinfo is None else st
+            day_diff = (st_utc.date() - now.date()).days
+            if day_diff == 0:
+                date_label = "Today"
+            elif day_diff == 1:
+                date_label = "Tomorrow"
+            elif 1 < day_diff < 7:
+                date_label = st_utc.strftime("%A")
+            else:
+                date_label = st_utc.strftime("%b %d, %Y")
+            time_label = st_utc.strftime("%I:%M %p").lstrip("0")
+        else:
+            date_label = "Scheduled"
+            time_label = "9:00 AM"
+        att_cnt = att_by_event.get(str(ev.id), 0)
+        exp_att = int(em.get("expectedAttendees") or max(att_cnt, 50))
+        upcoming_out.append(
+            {
+                "id": str(ev.id),
+                "title": ev.name,
+                "location": ev.location or "Main Sanctuary",
+                "time": time_label,
+                "date": date_label,
+                "attendees": exp_att,
+                "actualAttendees": att_cnt,
+                "category": (em.get("type") or "service").lower(),
+            }
+        )
+
+    # 8. Attendance Trends (Week 1 - Week 4)
+    target_cap = max(1, total_members, max(week_counts) if any(week_counts) else 1)
+    attendance_trends = [
+        {
+            "week": f"Week {i + 1}",
+            "attendees": cnt,
+            "percentage": min(100, round((cnt / target_cap) * 100)) if cnt > 0 else 0,
+        }
+        for i, cnt in enumerate(week_counts)
+    ]
+
+    # 9. Ministry Health
+    new_members_target = max(10, round(total_members * 0.2))
+    new_members_pct = min(
+        100, round((new_members_30d / max(1, new_members_target)) * 100)
+    )
+    prayer_pct = (
+        min(
+            100,
+            round(
+                ((answered_prayers if answered_prayers > 0 else active_prayers) / len(prayers))
+                * 100
+            ),
+        )
+        if prayers
+        else 0
+    )
+
+    return {
+        "churchName": church.name if church else "",
+        "stats": {
+            "totalMembers": {
+                "value": total_members,
+                "change": member_change,
+                "trend": member_trend,
+                "newThisMonth": new_members_30d,
+            },
+            "weeklyAttendance": {
+                "value": weekly_attendance_val,
+                "change": att_change,
+                "trend": att_trend,
+            },
+            "monthlyGiving": {
+                "value": monthly_giving_val,
+                "totalGiving": round(total_giving_all, 2),
+                "change": giving_change,
+                "trend": giving_trend,
+            },
+            "activeEvents": {
+                "value": len(active_events),
+                "change": f"+{new_events_30d}",
+                "trend": "up",
+            },
+        },
+        "recentActivities": feed[:8],
+        "upcomingEvents": upcoming_out,
+        "attendanceTrends": attendance_trends,
+        "ministryHealth": {
+            "newMembers": {
+                "count": new_members_30d,
+                "target": new_members_target,
+                "label": f"{new_members_30d} this month",
+                "percentage": new_members_pct,
+            },
+            "volunteerEngagement": {
+                "engagedCount": len(engaged_member_ids),
+                "totalMembers": total_members,
+                "label": f"{volunteer_engagement_pct}%",
+                "percentage": volunteer_engagement_pct,
+            },
+            "givingGoal": {
+                "amount": monthly_giving_val,
+                "goal": giving_goal,
+                "label": f"KES {monthly_giving_val:,.0f} / KES {giving_goal:,.0f}",
+                "percentage": giving_goal_pct,
+            },
+            "prayerRequests": {
+                "active": active_prayers,
+                "answered": answered_prayers,
+                "total": len(prayers),
+                "label": f"{active_prayers} active",
+                "percentage": prayer_pct,
+            },
+        },
+    }
+
+
+def _parse_iso_dt(val: Any) -> Optional[datetime]:
+    if not val:
+        return None
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=timezone.utc) if val.tzinfo is None else val
+    try:
+        dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+    except Exception:
+        return None
+
+
+async def _collect_church_notifications(
+    session: DbSession,
+    church_id: uuid.UUID,
+    church: Optional[Church],
+    user_id: uuid.UUID,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    now = _now()
+    meta = dict((church.metadata_json if church else None) or {})
+    notif_state_all = dict(meta.get("notification_state") or {})
+    user_state = dict(notif_state_all.get(str(user_id)) or {})
+    read_ids = set(user_state.get("read_ids") or [])
+    dismissed_ids = set(user_state.get("dismissed_ids") or [])
+    mark_all_before_str = user_state.get("mark_all_read_before")
+    mark_all_before = _parse_iso_dt(mark_all_before_str) if mark_all_before_str else None
+
+    raw_items: List[Dict[str, Any]] = []
+
+    # 1. Prayer Requests
+    prayers = (
+        await session.execute(
+            select(PrayerRequest, Member)
+            .outerjoin(Member, Member.id == PrayerRequest.member_id)
+            .where(PrayerRequest.church_id == church_id)
+            .order_by(PrayerRequest.created_at.desc())
+            .limit(10)
+        )
+    ).all()
+    prayer_meta_map = dict(meta.get("prayer_meta") or {})
+    for pr, mem in prayers:
+        nid = f"notif-prayer-{pr.id}"
+        pm = dict(prayer_meta_map.get(str(pr.id)) or {})
+        priority = str(pm.get("priority") or "").lower()
+        is_urgent = (
+            priority in ("urgent", "high", "critical")
+            or "urgent" in (pr.title or "").lower()
+            or "emergency" in (pr.title or "").lower()
+            or pr.status == PrayerStatus.ACTIVE
+        )
+        requester = (
+            mem.full_name
+            if mem
+            else (pm.get("requesterName") or "A church member")
+        )
+        dt = pr.created_at or now
+        raw_items.append(
+            {
+                "id": nid,
+                "type": "urgent" if is_urgent else "info",
+                "title": f"Prayer Request: {pr.title}",
+                "message": f"{requester}: {pr.content or pr.title}",
+                "time": _relative_time_label(dt, now),
+                "timestamp": _iso(dt) or "",
+                "_dt": dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt,
+                "category": "Prayer",
+                "actionUrl": "/church/prayer",
+            }
+        )
+
+    # 2. Recent Member Registrations
+    members = (
+        await session.execute(
+            select(Member)
+            .where(Member.church_id == church_id, Member.deleted_at.is_(None))
+            .order_by(Member.created_at.desc())
+            .limit(8)
+        )
+    ).scalars().all()
+    for m in members:
+        nid = f"notif-member-{m.id}"
+        dt = m.created_at or now
+        raw_items.append(
+            {
+                "id": nid,
+                "type": "info",
+                "title": "New Member Registration",
+                "message": f"{m.full_name} has completed membership registration",
+                "time": _relative_time_label(dt, now),
+                "timestamp": _iso(dt) or "",
+                "_dt": dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt,
+                "category": "Members",
+                "actionUrl": f"/church/users/{m.id}",
+            }
+        )
+
+    # 3. Offerings & Donations
+    offerings = (
+        await session.execute(
+            select(Offering, Fund, Member)
+            .outerjoin(Fund, Fund.id == Offering.fund_id)
+            .outerjoin(Member, Member.id == Offering.member_id)
+            .where(
+                Offering.church_id == church_id,
+                Offering.deleted_at.is_(None),
+            )
+            .order_by(Offering.received_at.desc())
+            .limit(8)
+        )
+    ).all()
+    for o, f, m in offerings:
+        nid = f"notif-offering-{o.id}"
+        dt = o.received_at or o.created_at or now
+        donor = m.full_name if m else "Anonymous donor"
+        fund_name = f.name if f else "General Offering"
+        raw_items.append(
+            {
+                "id": nid,
+                "type": "success",
+                "title": "Contribution Received",
+                "message": f"{donor} contributed KES {float(o.amount or 0):,.0f} towards {fund_name}",
+                "time": _relative_time_label(dt, now),
+                "timestamp": _iso(dt) or "",
+                "_dt": dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt,
+                "category": "Finance",
+                "actionUrl": "/church/contributions",
+            }
+        )
+
+    # 4. Events
+    events = (
+        await session.execute(
+            select(Event)
+            .where(Event.church_id == church_id, Event.status == EventStatus.ACTIVE)
+            .order_by(Event.start_time.desc())
+            .limit(8)
+        )
+    ).scalars().all()
+    att_counts = dict(
+        (
+            await session.execute(
+                select(Attendance.event_id, func.count(Attendance.id))
+                .join(Event, Event.id == Attendance.event_id)
+                .where(Event.church_id == church_id)
+                .group_by(Attendance.event_id)
+            )
+        ).all()
+    )
+    for ev in events:
+        nid = f"notif-event-{ev.id}"
+        dt = ev.created_at or ev.start_time or now
+        att_c = int(att_counts.get(ev.id, 0) or 0)
+        st = ev.start_time
+        st_str = (
+            st.strftime("%b %d at %I:%M %p").lstrip("0")
+            if st
+            else "Scheduled"
+        )
+        raw_items.append(
+            {
+                "id": nid,
+                "type": "warning",
+                "title": f"Event Reminder: {ev.name}",
+                "message": f"{ev.name} ({st_str}) at {ev.location or 'Main Sanctuary'} — {att_c} attendees recorded",
+                "time": _relative_time_label(dt, now),
+                "timestamp": _iso(dt) or "",
+                "_dt": dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt,
+                "category": "Events",
+                "actionUrl": "/church/events",
+            }
+        )
+
+    # 5. Volunteer / Department enrollments
+    dept_enrollments = (
+        await session.execute(
+            select(DepartmentMember, Department, Member)
+            .join(Department, Department.id == DepartmentMember.department_id)
+            .join(Member, Member.id == DepartmentMember.member_id)
+            .where(Department.church_id == church_id, Member.deleted_at.is_(None))
+            .order_by(DepartmentMember.created_at.desc())
+            .limit(6)
+        )
+    ).all()
+    for dm, dept, mem in dept_enrollments:
+        nid = f"notif-vol-{dm.id}"
+        dt = dm.created_at or now
+        role_label = str(_plain(dm.role) or "Volunteer").replace("_", " ").title()
+        raw_items.append(
+            {
+                "id": nid,
+                "type": "info",
+                "title": "Ministry Volunteer Assignment",
+                "message": f"{mem.full_name} joined {dept.name} ({role_label})",
+                "time": _relative_time_label(dt, now),
+                "timestamp": _iso(dt) or "",
+                "_dt": dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt,
+                "category": "Volunteers",
+                "actionUrl": "/church/volunteers",
+            }
+        )
+
+    # 6. Custom notifications in church metadata
+    for cn in list(meta.get("custom_notifications") or []):
+        if not isinstance(cn, dict):
+            continue
+        nid = str(cn.get("id") or "")
+        if not nid:
+            continue
+        dt = _parse_iso_dt(cn.get("timestamp")) or now
+        raw_items.append(
+            {
+                "id": nid,
+                "type": str(cn.get("type") or "info"),
+                "title": str(cn.get("title") or "System Notification"),
+                "message": str(cn.get("message") or ""),
+                "time": _relative_time_label(dt, now),
+                "timestamp": _iso(dt) or "",
+                "_dt": dt,
+                "category": str(cn.get("category") or "System"),
+                "actionUrl": str(cn.get("actionUrl") or "/church/notifications"),
+            }
+        )
+
+    # Filter out dismissed notifications & sort newest-first
+    visible_items: List[Dict[str, Any]] = []
+    for item in raw_items:
+        nid = item["id"]
+        if nid in dismissed_ids:
+            continue
+        item_dt: datetime = item.pop("_dt", now)
+        is_read = (nid in read_ids) or bool(
+            mark_all_before and item_dt <= mark_all_before
+        )
+        item["read"] = is_read
+        visible_items.append(item)
+
+    visible_items.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+
+    today_date = now.date()
+    today_count = 0
+    for n in visible_items:
+        ts_dt = _parse_iso_dt(n.get("timestamp"))
+        if ts_dt:
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+            if (now - ts_dt).days < 1 or ts_dt.date() == today_date:
+                today_count += 1
+
+    stats = {
+        "total": len(visible_items),
+        "unread": sum(1 for n in visible_items if not n["read"]),
+        "urgent": sum(1 for n in visible_items if n["type"] == "urgent"),
+        "today": today_count if today_count > 0 else len(visible_items),
+    }
+    return visible_items, stats
+
+
+@router.get("/notifications")
+async def get_church_notifications(
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+    filter: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    organizationId: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, organizationId)
+    )
+    church = await session.get(Church, actor.church_id)
+    notifications, stats = await _collect_church_notifications(
+        session, actor.church_id, church, current_user.id
+    )
+
+    filtered = notifications
+    if filter and filter != "all":
+        f_low = filter.lower()
+        if f_low == "unread":
+            filtered = [n for n in filtered if not n["read"]]
+        elif f_low == "read":
+            filtered = [n for n in filtered if n["read"]]
+        else:
+            filtered = [n for n in filtered if n["type"].lower() == f_low]
+
+    if category and category.lower() != "all":
+        c_low = category.lower()
+        filtered = [n for n in filtered if n["category"].lower() == c_low]
+
+    if search and search.strip():
+        q = search.strip().lower()
+        filtered = [
+            n
+            for n in filtered
+            if q in n["title"].lower()
+            or q in n["message"].lower()
+            or q in n["category"].lower()
+        ]
+
+    return {
+        "notifications": filtered,
+        "stats": stats,
+    }
+
+
+@router.post("/notifications/mark-all-read")
+async def mark_all_church_notifications_read(
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+    organizationId: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, organizationId)
+    )
+    church = await session.get(Church, actor.church_id)
+    if not church:
+        raise HTTPException(status_code=404, detail="Church not found")
+
+    notifications, _ = await _collect_church_notifications(
+        session, actor.church_id, church, current_user.id
+    )
+    meta = dict(church.metadata_json or {})
+    notif_state_all = dict(meta.get("notification_state") or {})
+    uid_str = str(current_user.id)
+    user_state = dict(notif_state_all.get(uid_str) or {})
+    read_ids = set(user_state.get("read_ids") or [])
+    for n in notifications:
+        read_ids.add(n["id"])
+    user_state["read_ids"] = list(read_ids)
+    user_state["mark_all_read_before"] = _iso(_now())
+    notif_state_all[uid_str] = user_state
+    meta["notification_state"] = notif_state_all
+    church.metadata_json = meta
+    flag_modified(church, "metadata_json")
+    await session.commit()
+
+    return {
+        "markedCount": len(notifications),
+        "unreadCount": 0,
+    }
+
+
+@router.post("/notifications/{notification_id}/read")
+async def mark_church_notification_read(
+    notification_id: str,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+    payload: Optional[Dict[str, Any]] = Body(default=None),
+    organizationId: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, organizationId)
+    )
+    church = await session.get(Church, actor.church_id)
+    if not church:
+        raise HTTPException(status_code=404, detail="Church not found")
+
+    mark_read = True
+    if payload and "read" in payload:
+        mark_read = bool(payload["read"])
+
+    meta = dict(church.metadata_json or {})
+    notif_state_all = dict(meta.get("notification_state") or {})
+    uid_str = str(current_user.id)
+    user_state = dict(notif_state_all.get(uid_str) or {})
+    read_ids = set(user_state.get("read_ids") or [])
+    if mark_read:
+        read_ids.add(notification_id)
+    else:
+        read_ids.discard(notification_id)
+    user_state["read_ids"] = list(read_ids)
+    notif_state_all[uid_str] = user_state
+    meta["notification_state"] = notif_state_all
+    church.metadata_json = meta
+    flag_modified(church, "metadata_json")
+    await session.commit()
+
+    _, stats = await _collect_church_notifications(
+        session, actor.church_id, church, current_user.id
+    )
+    return {
+        "id": notification_id,
+        "read": mark_read,
+        "unreadCount": stats["unread"],
+    }
+
+
+@router.delete("/notifications/{notification_id}")
+async def dismiss_church_notification(
+    notification_id: str,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+    organizationId: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, organizationId)
+    )
+    church = await session.get(Church, actor.church_id)
+    if not church:
+        raise HTTPException(status_code=404, detail="Church not found")
+
+    meta = dict(church.metadata_json or {})
+    notif_state_all = dict(meta.get("notification_state") or {})
+    uid_str = str(current_user.id)
+    user_state = dict(notif_state_all.get(uid_str) or {})
+    dismissed_ids = set(user_state.get("dismissed_ids") or [])
+    dismissed_ids.add(notification_id)
+    user_state["dismissed_ids"] = list(dismissed_ids)
+    notif_state_all[uid_str] = user_state
+    meta["notification_state"] = notif_state_all
+    church.metadata_json = meta
+    flag_modified(church, "metadata_json")
+    await session.commit()
+
+    _, stats = await _collect_church_notifications(
+        session, actor.church_id, church, current_user.id
+    )
+    return {
+        "id": notification_id,
+        "dismissed": True,
+        "unreadCount": stats["unread"],
+    }
+
+
+@router.get("/profile")
+async def get_admin_self_profile(
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+    organizationId: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, organizationId)
+    )
+    church = await session.get(Church, actor.church_id)
+    branch = (
+        await session.get(Branch, actor.member.branch_id)
+        if actor.member and actor.member.branch_id
+        else None
+    )
+    m = actor.member
+    meta = dict((church.metadata_json if church else None) or {})
+    admin_profiles = dict(meta.get("admin_profiles") or {})
+    prof_meta = dict(admin_profiles.get(str(current_user.id)) or {})
+    first_name = m.first_name if m else (current_user.display_name or "").split(" ")[0]
+    last_name = (
+        m.last_name
+        if m
+        else " ".join((current_user.display_name or "").split(" ")[1:])
+    )
+    full_name = f"{first_name} {last_name}".strip() or (current_user.display_name or "Admin")
+    return {
+        "id": str(current_user.id),
+        "memberId": str(m.id) if m else "",
+        "firstName": first_name,
+        "lastName": last_name,
+        "fullName": full_name,
+        "email": current_user.email,
+        "phoneNumber": (m.phone_number if m and m.phone_number else current_user.phone_number) or "",
+        "profilePictureUrl": (
+            (m.photo_url if m and m.photo_url else None)
+            or current_user.profile_picture_url
+            or ""
+        ),
+        "position": (m.position if m and m.position else "Church Administrator"),
+        "bio": str(prof_meta.get("bio") or ""),
+        "role": actor.roles[0] if actor.roles else "ADMIN",
+        "roles": list(actor.roles),
+        "churchId": str(actor.church_id),
+        "churchName": church.name if church else "",
+        "branchId": str(branch.id) if branch else "",
+        "branchName": branch.name if branch else "Headquarters",
+    }
+
+
+@router.put("/profile")
+async def update_admin_self_profile(
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+    payload: Dict[str, Any] = Body(...),
+    organizationId: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, organizationId)
+    )
+    church = await session.get(Church, actor.church_id)
+    m = actor.member
+
+    first_name = str(payload.get("firstName") or "").strip()
+    last_name = str(payload.get("lastName") or "").strip()
+    phone_number = str(payload.get("phoneNumber") or "").strip()
+    profile_pic = payload.get("profilePictureUrl")
+    position = payload.get("position")
+    bio = payload.get("bio")
+    new_password = payload.get("newPassword")
+    current_password = payload.get("currentPassword")
+
+    if new_password:
+        if current_password and not verify_password(
+            current_password, current_user.hashed_password
+        ):
+            raise HTTPException(
+                status_code=400, detail="Current password is incorrect"
+            )
+        if len(str(new_password)) < 6:
+            raise HTTPException(
+                status_code=400,
+                detail="New password must be at least 6 characters",
+            )
+        current_user.hashed_password = get_password_hash(str(new_password))
+
+    if first_name or last_name:
+        full_name = f"{first_name} {last_name}".strip()
+        current_user.display_name = full_name
+        if m:
+            if first_name:
+                m.first_name = first_name
+            if last_name:
+                m.last_name = last_name
+
+    if phone_number is not None:
+        current_user.phone_number = phone_number or None
+        if m:
+            m.phone_number = phone_number or None
+
+    if profile_pic is not None:
+        current_user.profile_picture_url = profile_pic or None
+        if m:
+            m.photo_url = profile_pic or None
+
+    if m and position is not None:
+        m.position = str(position).strip() or None
+
+    if church and bio is not None:
+        meta = dict(church.metadata_json or {})
+        admin_profiles = dict(meta.get("admin_profiles") or {})
+        prof_meta = dict(admin_profiles.get(str(current_user.id)) or {})
+        prof_meta["bio"] = str(bio).strip()
+        admin_profiles[str(current_user.id)] = prof_meta
+        meta["admin_profiles"] = admin_profiles
+        church.metadata_json = meta
+        flag_modified(church, "metadata_json")
+
+    await session.commit()
+    return await get_admin_self_profile(
+        request=request,
+        current_user=current_user,
+        session=session,
+        organizationId=organizationId,
+    )
+
+
 

@@ -163,7 +163,201 @@ class GroupPayload(BaseModel):
     establishedDate: Optional[str] = None
     meetingDay: Optional[List[str]] = None
     meetingTime: Optional[List[str]] = None
-    isActive: Optional[bool] = True
+    isActive: Optional[bool] = None
+
+
+def _normalize_category_key(cat: Optional[str]) -> str:
+    raw = (cat or "others").strip().lower().replace("_", "-").replace(" ", "-")
+    return raw
+
+
+def _format_category_label(cat_key: str) -> str:
+    return " ".join(w.capitalize() for w in cat_key.replace("-", " ").split())
+
+
+CATEGORY_COLORS = {
+    "bible-study": "#3b82f6",
+    "youth": "#10b981",
+    "prayer": "#f59e0b",
+    "fellowship": "#ef4444",
+    "worship": "#8b5cf6",
+    "children": "#06b6d4",
+    "marriage": "#84cc16",
+    "contribution": "#ec4899",
+    "others": "#64748b",
+}
+
+
+async def _compute_groups_analytics(session: DbSession, church_id: str) -> Dict[str, Any]:
+    all_groups = (
+        await session.execute(
+            select(Group).where(Group.church_id == church_id).order_by(Group.name, Group.id)
+        )
+    ).scalars().all()
+
+    formatted_all = [await _format_group(session, g) for g in all_groups]
+
+    total_groups = len(formatted_all)
+    active_groups = sum(1 for g in formatted_all if g.get("isActive"))
+    total_members = sum(int(g.get("memberCount", 0) or 0) for g in formatted_all)
+    total_capacity = sum(int(g.get("capacity", 0) or 0) for g in formatted_all)
+
+    now = _now()
+    current_ym = now.strftime("%Y-%m")
+
+    # Last 6 months labels & buckets
+    month_buckets: List[Dict[str, Any]] = []
+    for i in range(5, -1, -1):
+        m_num = now.month - i
+        y_num = now.year
+        while m_num <= 0:
+            m_num += 12
+            y_num -= 1
+        dt_m = datetime(y_num, m_num, 1, tzinfo=timezone.utc)
+        month_buckets.append({
+            "ym": dt_m.strftime("%Y-%m"),
+            "label": dt_m.strftime("%b"),
+            "year": y_num,
+            "month": m_num,
+        })
+
+    # Gather all GroupMember rows with joined dates for this church
+    gm_rows = (
+        await session.execute(
+            select(GroupMember, Group)
+            .join(Group, Group.id == GroupMember.group_id)
+            .where(Group.church_id == church_id)
+        )
+    ).all()
+
+    member_events: List[Dict[str, Any]] = []
+    for gm, grp in gm_rows:
+        _, meta = _parse_group_meta(grp.description)
+        roles_map = meta.get("memberRoles") if isinstance(meta.get("memberRoles"), dict) else {}
+        entry = roles_map.get(str(gm.member_id), {})
+        j_str = entry.get("joinedDate") or _iso(gm.joined_at) or _iso(grp.created_at) or _iso(now)
+        is_act = bool(entry.get("isActive", True))
+        ym = str(j_str)[:7] if j_str else current_ym
+        member_events.append({"ym": ym, "isActive": is_act})
+
+    attendance_data: List[Dict[str, Any]] = []
+    for b in month_buckets:
+        ym = b["ym"]
+        cum_total = sum(1 for e in member_events if e["ym"] <= ym)
+        cum_active = sum(1 for e in member_events if e["ym"] <= ym and e["isActive"])
+        new_in_m = sum(1 for e in member_events if e["ym"] == ym)
+        attendance_data.append({
+            "month": b["label"],
+            "total": cum_total,
+            "active": cum_active,
+            "new": new_in_m,
+        })
+
+    # Category distribution (by group count, or member count if requested, plus group count)
+    cat_counts: Dict[str, int] = {}
+    for g in formatted_all:
+        ckey = _normalize_category_key(g.get("category"))
+        cat_counts[ckey] = cat_counts.get(ckey, 0) + 1
+
+    category_distribution: List[Dict[str, Any]] = []
+    palette = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#84cc16", "#ec4899", "#64748b"]
+    for idx, (ckey, cnt) in enumerate(cat_counts.items()):
+        category_distribution.append({
+            "name": _format_category_label(ckey),
+            "category": ckey,
+            "value": cnt,
+            "color": CATEGORY_COLORS.get(ckey, palette[idx % len(palette)]),
+        })
+
+    # Meeting days distribution
+    days_order = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+    day_counts = {d.lower(): 0 for d in days_order}
+    for g in formatted_all:
+        m_days = g.get("meetingDay") if isinstance(g.get("meetingDay"), list) else []
+        for d in m_days:
+            dl = str(d).strip().lower()
+            if dl in day_counts:
+                day_counts[dl] += 1
+
+    meeting_days = [{"day": d, "groups": day_counts[d.lower()]} for d in days_order]
+
+    # Monthly activities & activity trends across last 6 months
+    monthly_activities_count = 0
+    act_buckets: Dict[str, Dict[str, Any]] = {
+        b["ym"]: {
+            "month": b["label"],
+            "worship": 0,
+            "children": 0,
+            "youth": 0,
+            "outreach": 0,
+            "education": 0,
+            "prayer": 0,
+            "total": 0,
+        }
+        for b in month_buckets
+    }
+
+    for g in all_groups:
+        _, meta = _parse_group_meta(g.description)
+        ckey = _normalize_category_key(meta.get("category"))
+        acts = meta.get("activities") if isinstance(meta.get("activities"), list) else []
+        for a in acts:
+            a_date = str(a.get("date") or a.get("createdAt") or "")
+            a_ym = a_date[:7] if len(a_date) >= 7 else current_ym
+            if a_ym == current_ym:
+                monthly_activities_count += 1
+            if a_ym in act_buckets:
+                bucket = act_buckets[a_ym]
+                bucket["total"] += 1
+                a_type = str(a.get("type") or "").lower()
+                if "worship" in ckey or a_type == "rehearsal":
+                    bucket["worship"] += 1
+                elif "children" in ckey:
+                    bucket["children"] += 1
+                elif "youth" in ckey:
+                    bucket["youth"] += 1
+                elif "outreach" in a_type or "outreach" in ckey:
+                    bucket["outreach"] += 1
+                elif "bible" in ckey or "training" in a_type or "workshop" in a_type:
+                    bucket["education"] += 1
+                elif "prayer" in ckey or "prayer" in a_type:
+                    bucket["prayer"] += 1
+                else:
+                    bucket["worship"] += 1
+
+    activity_data = [act_buckets[b["ym"]] for b in month_buckets]
+
+    return {
+        "totalGroups": total_groups,
+        "activeGroups": active_groups,
+        "totalMembers": total_members,
+        "totalCapacity": total_capacity,
+        "capacityUtilization": round((total_members / max(1, total_capacity)) * 100) if total_capacity > 0 else 0,
+        "availableSpots": max(0, total_capacity - total_members),
+        "monthlyActivities": monthly_activities_count,
+        "attendanceData": attendance_data,
+        "categoryDistribution": category_distribution,
+        "meetingDays": meeting_days,
+        "activityData": activity_data,
+    }
+
+
+@router.get("/analytics")
+async def get_groups_analytics(
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+    church_id: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, church_id)
+    )
+    analytics = await _compute_groups_analytics(session, actor.church_id)
+    return {
+        "success": True,
+        "data": analytics,
+        "analytics": analytics,
+    }
 
 
 @router.get("")
@@ -177,6 +371,8 @@ async def get_groups(
     branch_id: Optional[str] = Query(None),
     department_id: Optional[str] = Query(None),
     is_active: Optional[bool] = Query(None),
+    category: Optional[str] = Query(None),
+    meetingDay: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     limit: int = Query(100, ge=1, le=500),
     search: str = Query("", max_length=100),
@@ -196,35 +392,50 @@ async def get_groups(
         s = f"%{search.strip()}%"
         conds.append(or_(Group.name.ilike(s), Group.description.ilike(s)))
 
-    total = (
-        await session.execute(select(func.count(Group.id)).where(*conds))
-    ).scalar() or 0
-
-    if offset is None:
-        offset = (page - 1) * limit
-
     rows = (
         (
             await session.execute(
                 select(Group)
                 .where(*conds)
                 .order_by(Group.name, Group.id)
-                .limit(limit)
-                .offset(offset)
             )
         )
         .scalars()
         .all()
     )
 
-    formatted_groups = [await _format_group(session, g) for g in rows]
-    pages = math.ceil(total / limit) if limit else 1
+    all_formatted = [await _format_group(session, g) for g in rows]
+
+    # Apply metadata-based filters (category & meetingDay)
+    filtered_groups: List[Dict[str, Any]] = []
+    for fg in all_formatted:
+        if category and category.strip().lower() not in ("", "all"):
+            want_cat = _normalize_category_key(category)
+            have_cat = _normalize_category_key(fg.get("category"))
+            if want_cat != have_cat:
+                continue
+        if meetingDay and meetingDay.strip().lower() not in ("", "all"):
+            want_day = meetingDay.strip().lower()
+            have_days = [str(d).strip().lower() for d in (fg.get("meetingDay") or [])]
+            if want_day not in have_days:
+                continue
+        filtered_groups.append(fg)
+
+    total = len(filtered_groups)
+    if offset is None:
+        offset = (page - 1) * limit
+
+    paginated_groups = filtered_groups[offset : offset + limit]
+    pages = max(1, math.ceil(total / limit)) if limit else 1
     response.headers["X-Total-Count"] = str(total)
 
-    # Return structure matching frontend GroupListResponse: { groups: [...], pagination: { ... } }
+    analytics = await _compute_groups_analytics(session, actor.church_id)
+
+    # Return structure matching frontend GroupListResponse: { groups: [...], pagination: { ... }, analytics: { ... } }
     return {
-        "groups": formatted_groups,
-        "data": formatted_groups,
+        "groups": paginated_groups,
+        "data": paginated_groups,
+        "analytics": analytics,
         "pagination": {
             "page": page,
             "limit": limit,
@@ -315,6 +526,15 @@ async def create_group(
                 member_id=leader_id,
             )
         )
+        member_roles = meta.get("memberRoles") if isinstance(meta.get("memberRoles"), dict) else {}
+        member_roles[str(leader_id)] = {
+            "role": "leader",
+            "joinedDate": payload.establishedDate or _iso(_now()),
+            "isActive": True,
+            "notes": "",
+        }
+        meta["memberRoles"] = member_roles
+        group.description = _build_group_desc(payload.description or "", meta)
 
     await session.commit()
     await session.refresh(group)
@@ -415,7 +635,28 @@ async def update_group(
                     ).limit(1)
                 )
             ).scalar_one_or_none()
-            group.leader_member_id = str(leader_exists) if leader_exists else None
+            if leader_exists:
+                group.leader_member_id = str(leader_exists)
+                existing_gm = (
+                    await session.execute(
+                        select(GroupMember).where(
+                            GroupMember.group_id == group.id,
+                            GroupMember.member_id == str(leader_exists),
+                        ).limit(1)
+                    )
+                ).scalar_one_or_none()
+                if not existing_gm:
+                    session.add(GroupMember(group_id=group.id, member_id=str(leader_exists)))
+                member_roles = meta.get("memberRoles") if isinstance(meta.get("memberRoles"), dict) else {}
+                entry = member_roles.get(str(leader_exists), {})
+                entry["role"] = "leader"
+                entry.setdefault("joinedDate", _iso(_now()))
+                entry.setdefault("isActive", True)
+                member_roles[str(leader_exists)] = entry
+                meta["memberRoles"] = member_roles
+                group.description = _build_group_desc(clean_desc, meta)
+            else:
+                group.leader_member_id = None
         else:
             group.leader_member_id = None
     if payload.isActive is not None:
@@ -483,9 +724,9 @@ async def delete_group(
 class GroupMemberPayload(BaseModel):
     userId: Optional[str] = None
     memberId: Optional[str] = None
-    role: Optional[str] = "member"
+    role: Optional[str] = None
     joinedDate: Optional[str] = None
-    isActive: Optional[bool] = True
+    isActive: Optional[bool] = None
     notes: Optional[str] = None
 
 
@@ -778,12 +1019,12 @@ async def delete_group_member(
 class GroupGoalPayload(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
-    priority: Optional[str] = "medium"
+    priority: Optional[str] = None
     targetDate: Optional[str] = None
     category: Optional[str] = None
     assignee: Optional[Any] = None
-    status: Optional[str] = "planned"
-    progress: Optional[int] = 0
+    status: Optional[str] = None
+    progress: Optional[int] = None
     success: Optional[str] = None
 
 
@@ -1008,7 +1249,7 @@ async def delete_group_goal(
 
 
 class GroupActivityPayload(BaseModel):
-    type: Optional[str] = "meeting"
+    type: Optional[str] = None
     title: Optional[str] = None
     description: Optional[str] = None
     date: Optional[str] = None
@@ -1016,7 +1257,7 @@ class GroupActivityPayload(BaseModel):
     endTime: Optional[str] = None
     location: Optional[str] = None
     participants: Optional[List[Any]] = None
-    isCompleted: Optional[bool] = True
+    isCompleted: Optional[bool] = None
 
 
 @router.get("/{group_id}/activities")

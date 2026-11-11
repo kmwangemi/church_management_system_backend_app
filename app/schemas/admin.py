@@ -26,21 +26,47 @@ from app.schemas.common import (
 # Nested inputs (one per Member-scoped table). Replace the old Dict[str, Any].
 # --------------------------------------------------------------------------- #
 class EmergencyContactInput(InputModel):
-    full_name: str = Field(validation_alias=AliasChoices("fullName", "full_name", "name"))
-    phone_number: str = Field(
-        validation_alias=AliasChoices("phoneNumber", "phone_number", "phone")
+    full_name: OptionalStr = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "fullName", "full_name", "name", "emergencyContactFullName"
+        ),
     )
-    relationship_type: str = Field(
-        validation_alias=AliasChoices("relationshipType", "relationship_type", "relationship")
+    phone_number: OptionalStr = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "phoneNumber", "phone_number", "phone", "emergencyContactPhoneNumber"
+        ),
     )
-    email: OptionalEmail = None
-    address: OptionalStr = None
-    notes: OptionalStr = None
+    relationship_type: OptionalStr = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "relationshipType",
+            "relationship_type",
+            "relationship",
+            "emergencyContactRelationship",
+        ),
+    )
+    email: OptionalEmail = Field(
+        default=None,
+        validation_alias=AliasChoices("email", "emergencyContactEmail"),
+    )
+    address: OptionalStr = Field(
+        default=None,
+        validation_alias=AliasChoices("address", "emergencyContactAddress"),
+    )
+    notes: OptionalStr = Field(
+        default=None,
+        validation_alias=AliasChoices("notes", "emergencyContactNotes"),
+    )
 
 
 class MemberDetailsInput(InputModel):
     membership_date: Optional[datetime] = Field(
         default=None, validation_alias=AliasChoices("membershipDate", "membership_date")
+    )
+    joined_date: Optional[datetime] = Field(
+        default=None, validation_alias=AliasChoices("joinedDate", "joined_date")
     )
     baptism_date: Optional[datetime] = Field(
         default=None, validation_alias=AliasChoices("baptismDate", "baptism_date")
@@ -48,7 +74,17 @@ class MemberDetailsInput(InputModel):
     marital_status: Optional[MaritalStatus] = Field(
         default=None, validation_alias=AliasChoices("maritalStatus", "marital_status")
     )
+    membership_status: Optional[MembershipStatus] = Field(
+        default=None,
+        validation_alias=AliasChoices("membershipStatus", "membership_status"),
+    )
     occupation: OptionalStr = None
+    department_ids: Optional[List[str]] = Field(
+        default=None, validation_alias=AliasChoices("departmentIds", "department_ids")
+    )
+    group_ids: Optional[List[str]] = Field(
+        default=None, validation_alias=AliasChoices("groupIds", "group_ids")
+    )
 
 
 class VisitorDetailsInput(InputModel):
@@ -83,6 +119,15 @@ class PastorDetailsInput(InputModel):
     ordination_date: Optional[datetime] = Field(
         default=None, validation_alias=AliasChoices("ordinationDate", "ordination_date")
     )
+    sermon_count: Optional[int] = Field(
+        default=None, validation_alias=AliasChoices("sermonCount", "sermon_count")
+    )
+    counseling_sessions: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("counselingSessions", "counseling_sessions"),
+    )
+    qualifications: Optional[List[str]] = None
+    specializations: Optional[List[str]] = None
     biography: OptionalStr = None
 
 
@@ -93,15 +138,31 @@ class BishopDetailsInput(InputModel):
     jurisdiction_area: OptionalStr = Field(
         default=None, validation_alias=AliasChoices("jurisdictionArea", "jurisdiction_area")
     )
+    oversight_branches: Optional[List[str]] = Field(
+        default=None,
+        validation_alias=AliasChoices("oversightBranches", "oversight_branches"),
+    )
+    achievements: Optional[List[str]] = None
     biography: OptionalStr = None
 
 
 class StaffDetailsInput(InputModel):
-    job_title: str = Field(validation_alias=AliasChoices("jobTitle", "job_title"))
-    department: str
-    start_date: datetime = Field(validation_alias=AliasChoices("startDate", "start_date"))
+    job_title: OptionalStr = Field(
+        default=None, validation_alias=AliasChoices("jobTitle", "job_title")
+    )
+    department: OptionalStr = None
+    start_date: Optional[datetime] = Field(
+        default=None, validation_alias=AliasChoices("startDate", "start_date")
+    )
     end_date: Optional[datetime] = Field(
         default=None, validation_alias=AliasChoices("endDate", "end_date")
+    )
+    salary: Optional[float] = None
+    employment_type: OptionalStr = Field(
+        default=None, validation_alias=AliasChoices("employmentType", "employment_type")
+    )
+    is_active: Optional[bool] = Field(
+        default=None, validation_alias=AliasChoices("isActive", "is_active")
     )
 
 
@@ -110,12 +171,26 @@ class AdminDetailsInput(InputModel):
         default=AdminAccessLevel.NATIONAL,
         validation_alias=AliasChoices("accessLevel", "access_level"),
     )
+    assigned_branches: Optional[List[str]] = Field(
+        default=None,
+        validation_alias=AliasChoices("assignedBranches", "assigned_branches"),
+    )
+    permissions: Optional[List[str]] = None
 
 
 class VolunteerDetailsInput(InputModel):
     hours_contributed: int = Field(
         default=0, ge=0, validation_alias=AliasChoices("hoursContributed", "hours_contributed")
     )
+    volunteer_status: OptionalStr = Field(
+        default=None,
+        validation_alias=AliasChoices("volunteerStatus", "volunteer_status"),
+    )
+    availability_schedule: Optional[dict] = Field(
+        default=None,
+        validation_alias=AliasChoices("availabilitySchedule", "availability_schedule"),
+    )
+    departments: Optional[List[str]] = None
 
 
 class GuardianInput(InputModel):
@@ -131,9 +206,30 @@ class GuardianInput(InputModel):
     can_pickup: bool = Field(default=True, validation_alias=AliasChoices("canPickup", "can_pickup"))
 
 
+def _has_contact_info(d: dict) -> bool:
+    for k in (
+        "fullName",
+        "full_name",
+        "name",
+        "emergencyContactFullName",
+        "phoneNumber",
+        "phone_number",
+        "phone",
+        "emergencyContactPhoneNumber",
+    ):
+        val = d.get(k)
+        if isinstance(val, str) and val.strip():
+            return True
+    return False
+
+
 def _wrap_single_contact(v):
     # Old clients sent one dict (`emergencyDetails`); a member can now have several.
-    return [v] if isinstance(v, dict) else v
+    if isinstance(v, dict):
+        return [v] if _has_contact_info(v) else []
+    if isinstance(v, list):
+        return [item for item in v if not isinstance(item, dict) or _has_contact_info(item)]
+    return v
 
 
 # --------------------------------------------------------------------------- #
@@ -213,6 +309,10 @@ class AdminMemberUpdateRequest(InputModel):
     membershipNumber: OptionalStr = None
     joinedAt: Optional[date] = None
     profilePictureUrl: Optional[str] = None  # stored on Member.photo_url
+    maritalStatus: Optional[MaritalStatus] = None
+    occupation: OptionalStr = None
+    skills: Optional[List[str]] = None
+    notes: OptionalStr = None
     address: AddressField = None
 
     # If provided, REPLACES the member's emergency contacts.
@@ -247,6 +347,7 @@ class AdminBranchCreateRequest(InputModel):
     phoneNumber: OptionalStr = None
     capacity: Optional[int] = Field(default=500, ge=0)  # numeric strings are coerced
     establishedDate: Optional[str] = None
+    isActive: Optional[bool] = None
     address: AddressField = None
 
     @model_validator(mode="after")
@@ -266,6 +367,7 @@ class AdminBranchUpdateRequest(InputModel):
     phoneNumber: OptionalStr = None
     capacity: Optional[int] = Field(default=None, ge=0)
     status: Optional[str] = None
+    isActive: Optional[bool] = None
     establishedDate: Optional[str] = None
     address: AddressField = None
 
