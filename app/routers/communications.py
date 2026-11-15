@@ -42,21 +42,120 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 
-def _format_announcement(a: Announcement, author_name: str = "") -> Dict[str, Any]:
+_ANNOUNCEMENT_CATEGORY_LABELS = {
+    "general": "General",
+    "youth": "Youth",
+    "children": "Children",
+    "men": "Men",
+    "women": "Women",
+    "prayer": "Prayer",
+    "events": "Events",
+    "ministry": "Ministry",
+}
+
+_ANNOUNCEMENT_PRIORITY_LABELS = {
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+}
+
+_ANNOUNCEMENT_AUDIENCE_LABELS = {
+    "all": "All Members",
+    "all members": "All Members",
+    "youth": "Youth Group",
+    "children": "Children Ministry",
+    "men": "Men's Fellowship",
+    "women": "Women's Ministry",
+    "leaders": "Church Leaders",
+    "volunteers": "Volunteers",
+}
+
+_ANNOUNCEMENT_STATUS_LABELS = {
+    "published": "Published",
+    "active": "Published",
+    "draft": "Draft",
+    "scheduled": "Scheduled",
+    "expired": "Expired",
+    "archived": "Archived",
+}
+
+
+def _normalize_announcement_meta(
+    payload: Optional["AnnouncementPayload"] = None,
+    existing: Optional[Dict[str, Any]] = None,
+    is_active: bool = True,
+) -> Dict[str, Any]:
+    base = dict(existing or {})
+    if payload is not None:
+        if payload.category is not None:
+            raw_cat = payload.category.strip()
+            base["category"] = _ANNOUNCEMENT_CATEGORY_LABELS.get(
+                raw_cat.lower(), raw_cat.title() if raw_cat else "General"
+            )
+        if payload.priority is not None:
+            raw_pri = payload.priority.strip()
+            base["priority"] = _ANNOUNCEMENT_PRIORITY_LABELS.get(
+                raw_pri.lower(), raw_pri.title() if raw_pri else "Medium"
+            )
+        if payload.targetAudience is not None:
+            raw_aud = payload.targetAudience.strip()
+            base["targetAudience"] = _ANNOUNCEMENT_AUDIENCE_LABELS.get(
+                raw_aud.lower(), raw_aud if raw_aud else "All Members"
+            )
+        if payload.expiryDate is not None:
+            base["expiryDate"] = payload.expiryDate
+        if payload.status is not None:
+            raw_status = payload.status.strip()
+            base["status"] = _ANNOUNCEMENT_STATUS_LABELS.get(
+                raw_status.lower(), raw_status.title() if raw_status else "Published"
+            )
+        if payload.isPinned is not None:
+            base["isPinned"] = bool(payload.isPinned)
+
+    status_val = base.get("status")
+    if not status_val:
+        status_val = "Published" if is_active else "Archived"
+    else:
+        status_val = _ANNOUNCEMENT_STATUS_LABELS.get(status_val.lower(), status_val)
+
+    expiry_str = base.get("expiryDate")
+    if not expiry_str:
+        expiry_str = (_now() + timedelta(days=30)).strftime("%Y-%m-%d")
+
+    return {
+        "category": base.get("category") or "General",
+        "priority": base.get("priority") or "Medium",
+        "targetAudience": base.get("targetAudience") or "All Members",
+        "expiryDate": expiry_str,
+        "status": status_val,
+        "isPinned": bool(base.get("isPinned", False)),
+        "views": int(base.get("views", 0) or 0),
+    }
+
+
+def _format_announcement(
+    a: Announcement,
+    author_name: str = "",
+    meta_entry: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    norm = _normalize_announcement_meta(None, meta_entry, is_active=bool(a.is_active))
+    pub_dt = a.publish_date or a.created_at
     return {
         "_id": str(a.id),
         "id": str(a.id),
         "title": a.title,
         "content": a.content,
-        "category": "General",
-        "priority": "Medium",
-        "publishDate": _iso(a.publish_date or a.created_at),
-        "targetAudience": "All Members",
-        "author": author_name or "Church Admin",
+        "category": norm["category"],
+        "priority": norm["priority"],
+        "publishDate": _iso(pub_dt),
+        "expiryDate": norm["expiryDate"],
+        "targetAudience": norm["targetAudience"],
+        "author": author_name or (meta_entry or {}).get("author") or "Church Admin",
         "authorRole": "Admin",
-        "status": "Active" if a.is_active else "Archived",
-        "isPinned": False,
-        "pinned": False,
+        "status": norm["status"],
+        "isPinned": norm["isPinned"],
+        "pinned": norm["isPinned"],
+        "views": norm["views"],
         "likes": 0,
         "comments": 0,
         "createdAt": _iso(a.created_at),
@@ -65,14 +164,14 @@ def _format_announcement(a: Announcement, author_name: str = "") -> Dict[str, An
 
 
 class AnnouncementPayload(BaseModel):
-    title: str
-    content: str
+    title: Optional[str] = None
+    content: Optional[str] = None
     category: Optional[str] = "General"
     priority: Optional[str] = "Medium"
     publishDate: Optional[str] = None
     targetAudience: Optional[str] = "All Members"
     expiryDate: Optional[str] = None
-    status: Optional[str] = "Active"
+    status: Optional[str] = "Published"
     isPinned: Optional[bool] = False
     branchId: Optional[str] = None
     branch_id: Optional[str] = None
@@ -80,13 +179,145 @@ class AnnouncementPayload(BaseModel):
 
 class MessagePayload(BaseModel):
     type: Optional[str] = "SMS"
-    title: str
-    content: str
+    title: Optional[str] = None
+    content: Optional[str] = None
     recipients: Optional[List[str]] = None
     scheduleType: Optional[str] = "now"
     scheduleDate: Optional[str] = None
     scheduleTime: Optional[str] = None
     template: Optional[str] = None
+    status: Optional[str] = None
+
+
+class MessageTemplatePayload(BaseModel):
+    name: Optional[str] = None
+    type: Optional[str] = "SMS"
+    category: Optional[str] = "General"
+    content: Optional[str] = None
+
+
+def _default_message_templates() -> List[Dict[str, Any]]:
+    now_iso = _iso(_now())
+    return [
+        {
+            "id": "tpl-sunday-reminder",
+            "_id": "tpl-sunday-reminder",
+            "name": "Sunday Service Reminder",
+            "type": "SMS",
+            "category": "Service Reminders",
+            "content": "Join us this Sunday for worship service at 9:00 AM and 11:00 AM. Youth service at 6:00 PM. See you there!",
+            "usageCount": 4,
+            "lastUsed": now_iso,
+            "createdAt": now_iso,
+        },
+        {
+            "id": "tpl-welcome-member",
+            "_id": "tpl-welcome-member",
+            "name": "Welcome New Member",
+            "type": "Email",
+            "category": "Member Onboarding",
+            "content": "Welcome to our church family! We're excited to have you join our community of faith.",
+            "usageCount": 2,
+            "lastUsed": now_iso,
+            "createdAt": now_iso,
+        },
+        {
+            "id": "tpl-event-confirmation",
+            "_id": "tpl-event-confirmation",
+            "name": "Event Registration Confirmation",
+            "type": "Email",
+            "category": "Events",
+            "content": "Thank you for registering for our upcoming event. Here are the details you need to know...",
+            "usageCount": 3,
+            "lastUsed": now_iso,
+            "createdAt": now_iso,
+        },
+        {
+            "id": "tpl-prayer-followup",
+            "_id": "tpl-prayer-followup",
+            "name": "Prayer Request Follow-up",
+            "type": "SMS",
+            "category": "Pastoral Care",
+            "content": "We wanted to follow up on your recent prayer request and let you know we're still praying for you.",
+            "usageCount": 1,
+            "lastUsed": now_iso,
+            "createdAt": now_iso,
+        },
+        {
+            "id": "tpl-volunteer-schedule",
+            "_id": "tpl-volunteer-schedule",
+            "name": "Volunteer Schedule Notification",
+            "type": "Email",
+            "category": "Volunteers",
+            "content": "Here is your volunteer schedule for the upcoming month. Thank you for your faithful service!",
+            "usageCount": 2,
+            "lastUsed": now_iso,
+            "createdAt": now_iso,
+        },
+    ]
+
+
+def _ensure_message_templates(meta: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
+    if meta.get("message_templates") is None:
+        seeded = _default_message_templates()
+        meta["message_templates"] = seeded
+        return seeded, True
+    return list(meta.get("message_templates") or []), False
+
+
+def _normalize_message_record(m: Dict[str, Any], fallback_recipients: int = 0) -> Dict[str, Any]:
+    msg_id = str(m.get("id") or m.get("_id") or uuid.uuid4())
+    raw_type = str(m.get("type") or "SMS").strip()
+    norm_type = "Email" if raw_type.lower() == "email" else "SMS"
+
+    raw_status = str(m.get("status") or "").strip().lower()
+    sched_type = str(m.get("scheduleType") or "now").strip().lower()
+    if raw_status in ("draft",) or sched_type == "draft":
+        norm_status = "Draft"
+    elif raw_status in ("scheduled",) or sched_type == "scheduled":
+        norm_status = "Scheduled"
+    elif raw_status in ("failed",):
+        norm_status = "Failed"
+    else:
+        norm_status = "Sent"
+
+    raw_recipients = m.get("recipients")
+    if isinstance(raw_recipients, list):
+        recipient_groups = [str(x) for x in raw_recipients]
+        recipient_count = int(m.get("recipientCount") or fallback_recipients or len(recipient_groups))
+    else:
+        recipient_groups = list(m.get("recipientGroups") or ["all_members"])
+        try:
+            recipient_count = int(raw_recipients if raw_recipients is not None else (m.get("recipientCount") or fallback_recipients))
+        except Exception:
+            recipient_count = int(m.get("recipientCount") or fallback_recipients or 0)
+
+    sent_date = m.get("sentDate") or m.get("sentAt") or m.get("scheduleDate") or m.get("createdAt") or _iso(_now())
+    delivery_rate = m.get("deliveryRate")
+    if delivery_rate is None:
+        delivery_rate = 100.0 if norm_status == "Sent" else 0.0
+
+    return {
+        **m,
+        "_id": msg_id,
+        "id": msg_id,
+        "type": norm_type,
+        "title": m.get("title") or "Untitled Message",
+        "content": m.get("content") or "",
+        "recipients": recipient_count,
+        "recipientCount": recipient_count,
+        "recipientGroups": recipient_groups,
+        "recipientGroupNames": m.get("recipientGroupNames") or [],
+        "scheduleType": m.get("scheduleType") or "now",
+        "scheduleDate": m.get("scheduleDate"),
+        "scheduleTime": m.get("scheduleTime"),
+        "status": norm_status,
+        "sentBy": m.get("sentBy") or "Church Admin",
+        "sentDate": sent_date,
+        "sentAt": m.get("sentAt") or sent_date,
+        "deliveryRate": round(float(delivery_rate), 1),
+        "createdAt": m.get("createdAt") or sent_date,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -99,23 +330,24 @@ async def list_announcements(
     current_user: CurrentUser,
     session: DbSession,
     page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=200),
     search: str = Query("", max_length=100),
+    category: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
     church_id: Optional[str] = Query(None),
 ):
     actor = await resolve_actor(
         session, current_user, church_id_from(request, church_id)
     )
+    church = await _get_church(session, actor.church_id)
+    ann_meta_map: Dict[str, Any] = dict((church.metadata_json or {}).get("announcement_meta") or {})
+
     conds = [Announcement.church_id == actor.church_id]
     if search:
         s = f"%{search.strip()}%"
         conds.append(or_(Announcement.title.ilike(s), Announcement.content.ilike(s)))
 
-    total = (
-        await session.execute(select(func.count(Announcement.id)).where(*conds))
-    ).scalar() or 0
-
-    offset = (page - 1) * limit
     rows = (
         (
             await session.execute(
@@ -124,14 +356,12 @@ async def list_announcements(
                 .outerjoin(User, User.id == Member.user_id)
                 .where(*conds)
                 .order_by(Announcement.created_at.desc())
-                .offset(offset)
-                .limit(limit)
             )
         )
         .all()
     )
 
-    announcements = [
+    all_announcements = [
         _format_announcement(
             a,
             (
@@ -139,10 +369,34 @@ async def list_announcements(
                 if m
                 else (u.display_name if u and u.display_name else "")
             ),
+            ann_meta_map.get(str(a.id)),
         )
         for a, m, u in rows
     ]
-    pages = math.ceil(total / limit) if limit else 1
+
+    if category and category.lower() != "all":
+        all_announcements = [
+            item for item in all_announcements if (item.get("category") or "").lower() == category.lower()
+        ]
+    if status and status.lower() != "all":
+        all_announcements = [
+            item for item in all_announcements if (item.get("status") or "").lower() == status.lower()
+        ]
+    if priority and priority.lower() != "all":
+        all_announcements = [
+            item for item in all_announcements if (item.get("priority") or "").lower() == priority.lower()
+        ]
+
+    # Sort pinned announcements first, then by createdAt descending
+    all_announcements.sort(
+        key=lambda item: (1 if item.get("isPinned") else 0, item.get("createdAt") or ""),
+        reverse=True,
+    )
+
+    total = len(all_announcements)
+    offset = (page - 1) * limit
+    announcements = all_announcements[offset : offset + limit]
+    pages = max(1, math.ceil(total / limit)) if limit else 1
     response.headers["X-Total-Count"] = str(total)
 
     return {
@@ -171,29 +425,47 @@ async def create_announcement(
     actor = await resolve_actor(
         session, current_user, church_id_from(request, church_id)
     )
-    title = payload.title.strip()
+    title = (payload.title or "").strip()
     if not title:
         raise HTTPException(status_code=400, detail="Title is required")
 
     pub_date = _now()
     if payload.publishDate:
         try:
-            pub_date = datetime.strptime(payload.publishDate, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            pub_date = datetime.strptime(payload.publishDate[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         except Exception:
             pub_date = _now()
 
     author_id = actor.member.id if actor.member else None
+    author_name = (
+        f"{actor.member.first_name or ''} {actor.member.last_name or ''}".strip()
+        if actor.member
+        else (current_user.display_name or "Church Admin")
+    )
+
+    norm_meta = _normalize_announcement_meta(payload, None, is_active=True)
+    norm_meta["author"] = author_name
 
     announcement = Announcement(
         title=title,
-        content=payload.content,
+        content=payload.content or "",
         church_id=actor.church_id,
         branch_id=payload.branchId or payload.branch_id,
         author_member_id=author_id,
         publish_date=pub_date,
-        is_active=payload.status != "Archived",
+        is_active=norm_meta["status"] in ("Published", "Active"),
     )
     session.add(announcement)
+    await session.flush()
+
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    ann_meta_map = dict(meta.get("announcement_meta") or {})
+    ann_meta_map[str(announcement.id)] = norm_meta
+    meta["announcement_meta"] = ann_meta_map
+    church.metadata_json = meta
+    flag_modified(church, "metadata_json")
+
     await session.commit()
     await session.refresh(announcement)
 
@@ -207,7 +479,7 @@ async def create_announcement(
         church_id=actor.church_id,
     )
 
-    formatted = _format_announcement(announcement)
+    formatted = _format_announcement(announcement, author_name, norm_meta)
     return {
         "status": "success",
         "message": "Announcement created successfully",
@@ -235,11 +507,52 @@ async def get_announcement(
     if not a:
         raise HTTPException(status_code=404, detail="Announcement not found")
 
-    formatted = _format_announcement(a)
+    church = await _get_church(session, actor.church_id)
+    ann_meta_map = dict((church.metadata_json or {}).get("announcement_meta") or {})
+    formatted = _format_announcement(a, "", ann_meta_map.get(str(a.id)))
     return {"announcement": formatted, "data": {"announcement": formatted}}
 
 
+@router.post("/announcements/{announcement_id}/view")
+async def increment_announcement_view(
+    announcement_id: str,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    a = (
+        await session.execute(
+            select(Announcement).where(
+                Announcement.id == announcement_id,
+                Announcement.church_id == actor.church_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not a:
+        raise HTTPException(status_code=404, detail="Announcement not found")
+
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    ann_meta_map = dict(meta.get("announcement_meta") or {})
+    entry = _normalize_announcement_meta(None, ann_meta_map.get(str(a.id)), is_active=bool(a.is_active))
+    entry["views"] = int(entry.get("views", 0) or 0) + 1
+    ann_meta_map[str(a.id)] = entry
+    meta["announcement_meta"] = ann_meta_map
+    church.metadata_json = meta
+    flag_modified(church, "metadata_json")
+    await session.commit()
+
+    formatted = _format_announcement(a, "", entry)
+    return {
+        "status": "success",
+        "announcement": formatted,
+        "data": formatted,
+    }
+
+
 @router.put("/announcements/{announcement_id}")
+@router.patch("/announcements/{announcement_id}")
 async def update_announcement(
     announcement_id: str,
     payload: AnnouncementPayload,
@@ -260,18 +573,35 @@ async def update_announcement(
     if not a:
         raise HTTPException(status_code=404, detail="Announcement not found")
 
-    if payload.title:
+    if payload.title is not None and payload.title.strip():
         a.title = payload.title.strip()
-    if payload.content:
+    if payload.content is not None:
         a.content = payload.content
-    if payload.status:
-        a.is_active = payload.status != "Archived"
+    if payload.publishDate:
+        try:
+            a.publish_date = datetime.strptime(payload.publishDate[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    ann_meta_map = dict(meta.get("announcement_meta") or {})
+    updated_meta = _normalize_announcement_meta(
+        payload,
+        ann_meta_map.get(str(a.id)),
+        is_active=bool(a.is_active),
+    )
+    a.is_active = updated_meta["status"] in ("Published", "Active")
+    ann_meta_map[str(a.id)] = updated_meta
+    meta["announcement_meta"] = ann_meta_map
+    church.metadata_json = meta
+    flag_modified(church, "metadata_json")
 
     a.updated_at = _now()
     await session.commit()
     await session.refresh(a)
 
-    formatted = _format_announcement(a)
+    formatted = _format_announcement(a, "", updated_meta)
     return {
         "status": "success",
         "message": "Announcement updated successfully",
@@ -299,9 +629,315 @@ async def delete_announcement(
     if not a:
         raise HTTPException(status_code=404, detail="Announcement not found")
 
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    ann_meta_map = dict(meta.get("announcement_meta") or {})
+    if str(a.id) in ann_meta_map:
+        ann_meta_map.pop(str(a.id), None)
+        meta["announcement_meta"] = ann_meta_map
+        church.metadata_json = meta
+        flag_modified(church, "metadata_json")
+
     await session.delete(a)
     await session.commit()
     return {"status": "success", "message": "Announcement deleted successfully"}
+
+
+# ---------------------------------------------------------------------------
+# Message Templates & Communication Stats
+# ---------------------------------------------------------------------------
+@router.get("/messages/templates")
+async def list_message_templates(
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+    search: str = Query("", max_length=100),
+    type: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    church_id: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, church_id)
+    )
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    templates, changed = _ensure_message_templates(meta)
+    if changed:
+        church.metadata_json = meta
+        flag_modified(church, "metadata_json")
+        await session.commit()
+
+    results = list(templates)
+    if search:
+        s = search.lower().strip()
+        results = [
+            t
+            for t in results
+            if s in (t.get("name") or "").lower()
+            or s in (t.get("content") or "").lower()
+            or s in (t.get("category") or "").lower()
+        ]
+    if type and type.lower() != "all":
+        results = [
+            t for t in results if (t.get("type") or "").lower() == type.lower()
+        ]
+    if category and category.lower() != "all":
+        results = [
+            t for t in results if (t.get("category") or "").lower() == category.lower()
+        ]
+
+    return {
+        "status": "success",
+        "templates": results,
+        "data": {
+            "templates": results,
+            "total": len(results),
+        },
+    }
+
+
+@router.post("/messages/templates")
+async def create_message_template(
+    payload: MessageTemplatePayload,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+    church_id: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, church_id)
+    )
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Template name is required")
+    content = (payload.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Template content is required")
+
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    templates, _ = _ensure_message_templates(meta)
+
+    raw_type = (payload.type or "SMS").strip()
+    norm_type = "Email" if raw_type.lower() == "email" else "SMS"
+    tpl_id = f"tpl-{uuid.uuid4().hex[:8]}"
+    now_iso = _iso(_now())
+    new_tpl = {
+        "id": tpl_id,
+        "_id": tpl_id,
+        "name": name,
+        "type": norm_type,
+        "category": (payload.category or "General").strip() or "General",
+        "content": content,
+        "usageCount": 0,
+        "lastUsed": now_iso,
+        "createdAt": now_iso,
+    }
+    templates.insert(0, new_tpl)
+    meta["message_templates"] = templates
+    church.metadata_json = meta
+    flag_modified(church, "metadata_json")
+    await session.commit()
+
+    return {
+        "status": "success",
+        "message": "Message template created successfully",
+        "template": new_tpl,
+        "data": new_tpl,
+    }
+
+
+@router.put("/messages/templates/{template_id}")
+@router.patch("/messages/templates/{template_id}")
+async def update_message_template(
+    template_id: str,
+    payload: MessageTemplatePayload,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    templates, _ = _ensure_message_templates(meta)
+
+    target = None
+    for t in templates:
+        if t.get("id") == template_id or t.get("_id") == template_id:
+            target = t
+            break
+
+    if not target:
+        raise HTTPException(status_code=404, detail="Message template not found")
+
+    if payload.name is not None and payload.name.strip():
+        target["name"] = payload.name.strip()
+    if payload.type is not None and payload.type.strip():
+        target["type"] = "Email" if payload.type.strip().lower() == "email" else "SMS"
+    if payload.category is not None and payload.category.strip():
+        target["category"] = payload.category.strip()
+    if payload.content is not None and payload.content.strip():
+        target["content"] = payload.content.strip()
+    target["updatedAt"] = _iso(_now())
+
+    meta["message_templates"] = templates
+    church.metadata_json = meta
+    flag_modified(church, "metadata_json")
+    await session.commit()
+
+    return {
+        "status": "success",
+        "message": "Message template updated successfully",
+        "template": target,
+        "data": target,
+    }
+
+
+@router.delete("/messages/templates/{template_id}")
+async def delete_message_template(
+    template_id: str,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    templates, _ = _ensure_message_templates(meta)
+
+    before_len = len(templates)
+    templates = [
+        t for t in templates if t.get("id") != template_id and t.get("_id") != template_id
+    ]
+    if len(templates) == before_len:
+        raise HTTPException(status_code=404, detail="Message template not found")
+
+    meta["message_templates"] = templates
+    church.metadata_json = meta
+    flag_modified(church, "metadata_json")
+    await session.commit()
+
+    return {"status": "success", "message": "Message template deleted successfully"}
+
+
+@router.get("/communications/stats")
+@router.get("/messages/stats")
+async def get_communication_stats(
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+    church_id: Optional[str] = Query(None),
+):
+    actor = await resolve_actor(
+        session, current_user, church_id_from(request, church_id)
+    )
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    templates, changed = _ensure_message_templates(meta)
+    if changed:
+        church.metadata_json = meta
+        flag_modified(church, "metadata_json")
+        await session.commit()
+
+    total_members = (
+        await session.execute(
+            select(func.count(Member.id)).where(
+                Member.church_id == actor.church_id,
+                Member.deleted_at.is_(None),
+            )
+        )
+    ).scalar() or 0
+
+    raw_messages: List[Dict[str, Any]] = list(meta.get("messages") or [])
+    messages = [_normalize_message_record(m, total_members) for m in raw_messages]
+
+    ann_rows = (
+        await session.execute(
+            select(Announcement).where(Announcement.church_id == actor.church_id)
+        )
+    ).scalars().all()
+    ann_meta_map: Dict[str, Any] = dict(meta.get("announcement_meta") or {})
+    announcements = [
+        _format_announcement(a, "", ann_meta_map.get(str(a.id))) for a in ann_rows
+    ]
+
+    now_dt = _now()
+    today_str = now_dt.strftime("%Y-%m-%d")
+    week_ago = now_dt - timedelta(days=7)
+    two_weeks_ago = now_dt - timedelta(days=14)
+
+    sent_today = 0
+    total_recipients = 0
+    sms_rates: List[float] = []
+    email_rates: List[float] = []
+    sms_count = 0
+    email_count = 0
+    messages_this_week = 0
+    messages_last_week = 0
+
+    for m in messages:
+        total_recipients += int(m.get("recipients") or 0)
+        m_type = (m.get("type") or "SMS").upper()
+        if m_type == "SMS":
+            sms_count += 1
+            if m.get("status") == "Sent":
+                sms_rates.append(float(m.get("deliveryRate") or 100.0))
+        else:
+            email_count += 1
+            if m.get("status") == "Sent":
+                email_rates.append(float(m.get("deliveryRate") or 100.0))
+
+        sent_date_str = str(m.get("sentDate") or m.get("createdAt") or "")
+        if m.get("status") == "Sent" and sent_date_str[:10] == today_str:
+            sent_today += 1
+
+        try:
+            dt_val = datetime.fromisoformat(sent_date_str.replace("Z", "+00:00"))
+            if dt_val.tzinfo is None:
+                dt_val = dt_val.replace(tzinfo=timezone.utc)
+            if dt_val >= week_ago:
+                messages_this_week += 1
+            elif dt_val >= two_weeks_ago:
+                messages_last_week += 1
+        except Exception:
+            pass
+
+    active_announcements = sum(
+        1 for a in announcements if (a.get("status") or "").lower() == "published"
+    )
+    total_views = sum(int(a.get("views") or 0) for a in announcements)
+
+    sms_delivery_rate = round(sum(sms_rates) / len(sms_rates), 1) if sms_rates else 98.5
+    email_delivery_rate = (
+        round(sum(email_rates) / len(email_rates), 1) if email_rates else 94.2
+    )
+
+    max_weekly = max(messages_this_week, messages_last_week, 1)
+    this_week_percent = min(100, round((messages_this_week / max_weekly) * 100)) if messages_this_week else 0
+    last_week_percent = min(100, round((messages_last_week / max_weekly) * 100)) if messages_last_week else 0
+
+    stats_payload = {
+        "totalMessages": len(messages),
+        "sentToday": sent_today,
+        "activeAnnouncements": active_announcements,
+        "totalAnnouncements": len(announcements),
+        "totalRecipients": total_recipients,
+        "smsDeliveryRate": sms_delivery_rate,
+        "emailDeliveryRate": email_delivery_rate,
+        "smsCount": sms_count,
+        "emailCount": email_count,
+        "messagesThisWeek": messages_this_week,
+        "messagesLastWeek": messages_last_week,
+        "thisWeekPercent": this_week_percent,
+        "lastWeekPercent": last_week_percent,
+        "totalTemplates": len(templates),
+        "totalViews": total_views,
+    }
+    return {
+        "status": "success",
+        "stats": stats_payload,
+        "data": stats_payload,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +949,7 @@ async def list_messages(
     current_user: CurrentUser,
     session: DbSession,
     page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(50, ge=1, le=200),
     search: str = Query("", max_length=100),
     type: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
@@ -325,7 +961,17 @@ async def list_messages(
     )
     church = await _get_church(session, actor.church_id)
     meta = dict(church.metadata_json or {})
-    church_messages: List[Dict[str, Any]] = list(meta.get("messages") or [])
+    total_members = (
+        await session.execute(
+            select(func.count(Member.id)).where(
+                Member.church_id == actor.church_id,
+                Member.deleted_at.is_(None),
+            )
+        )
+    ).scalar() or 0
+
+    raw_messages: List[Dict[str, Any]] = list(meta.get("messages") or [])
+    church_messages = [_normalize_message_record(m, total_members) for m in raw_messages]
 
     if search:
         s = search.lower()
@@ -390,34 +1036,105 @@ async def create_message(
     actor = await resolve_actor(
         session, current_user, church_id_from(request, church_id)
     )
+    title = (payload.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Message title is required")
+
     church = await _get_church(session, actor.church_id)
     meta = dict(church.metadata_json or {})
     church_messages: List[Dict[str, Any]] = list(meta.get("messages") or [])
 
-    total_members = (
-        await session.execute(
-            select(func.count(Member.id)).where(
-                Member.church_id == actor.church_id,
-                Member.deleted_at.is_(None),
+    groups_out = await _build_recipient_groups(session, actor.church_id)
+    by_id = {g["id"]: g for g in groups_out}
+    by_target = {g.get("targetId"): g for g in groups_out if g.get("targetId")}
+
+    selected_groups = payload.recipients or ["all_members"]
+    recipient_count = 0
+    group_names: List[str] = []
+    for rid in selected_groups:
+        g = by_id.get(rid) or by_target.get(rid)
+        if g:
+            recipient_count += int(g.get("count") or 0)
+            group_names.append(str(g.get("name") or rid))
+        else:
+            group_names.append(str(rid))
+
+    if recipient_count <= 0:
+        total_members = (
+            await session.execute(
+                select(func.count(Member.id)).where(
+                    Member.church_id == actor.church_id,
+                    Member.deleted_at.is_(None),
+                )
             )
-        )
-    ).scalar() or 1
+        ).scalar() or 1
+        recipient_count = total_members
+
+    sched_type = (payload.scheduleType or "now").lower()
+    if sched_type == "draft":
+        msg_status = "Draft"
+    elif sched_type == "scheduled":
+        msg_status = "Scheduled"
+    else:
+        msg_status = "Sent"
+
+    raw_type = (payload.type or "SMS").strip()
+    norm_type = "Email" if raw_type.lower() == "email" else "SMS"
+
+    sent_by = (
+        f"{actor.member.first_name or ''} {actor.member.last_name or ''}".strip()
+        if actor.member
+        else (current_user.display_name or "Church Admin")
+    )
+
+    now_iso = _iso(_now())
+    sent_date = now_iso
+    if sched_type == "scheduled" and payload.scheduleDate:
+        if payload.scheduleTime:
+            sent_date = f"{payload.scheduleDate[:10]}T{payload.scheduleTime}:00Z"
+        else:
+            sent_date = payload.scheduleDate
+
+    # If a template was used, increment its usageCount
+    if payload.template and payload.template != "none":
+        templates, _ = _ensure_message_templates(meta)
+        for t in templates:
+            if (
+                t.get("id") == payload.template
+                or t.get("_id") == payload.template
+                or (t.get("name") or "").lower() == payload.template.lower()
+            ):
+                t["usageCount"] = int(t.get("usageCount") or 0) + 1
+                t["lastUsed"] = now_iso
+                break
+        meta["message_templates"] = templates
 
     msg_id = str(uuid.uuid4())
-    msg_obj = {
-        "_id": msg_id,
-        "id": msg_id,
-        "churchId": actor.church_id,
-        "type": payload.type or "SMS",
-        "title": payload.title,
-        "content": payload.content,
-        "recipients": payload.recipients or ["all_members"],
-        "recipientCount": total_members,
-        "scheduleType": payload.scheduleType or "now",
-        "status": "draft" if payload.scheduleType == "draft" else "sent",
-        "sentAt": _iso(_now()),
-        "createdAt": _iso(_now()),
-    }
+    msg_obj = _normalize_message_record(
+        {
+            "_id": msg_id,
+            "id": msg_id,
+            "churchId": actor.church_id,
+            "type": norm_type,
+            "title": title,
+            "content": payload.content or "",
+            "recipients": recipient_count,
+            "recipientCount": recipient_count,
+            "recipientGroups": selected_groups,
+            "recipientGroupNames": group_names,
+            "scheduleType": sched_type,
+            "scheduleDate": payload.scheduleDate,
+            "scheduleTime": payload.scheduleTime,
+            "template": payload.template,
+            "status": msg_status,
+            "sentBy": sent_by,
+            "sentDate": sent_date,
+            "sentAt": now_iso,
+            "deliveryRate": 100.0 if msg_status == "Sent" else 0.0,
+            "createdAt": now_iso,
+        },
+        recipient_count,
+    )
     church_messages.insert(0, msg_obj)
     meta["messages"] = church_messages
     church.metadata_json = meta
@@ -437,8 +1154,132 @@ async def create_message(
     return {
         "status": "success",
         "success": True,
-        "message": "Message sent successfully",
+        "message": "Message saved as draft" if msg_status == "Draft" else ("Message scheduled successfully" if msg_status == "Scheduled" else "Message sent successfully"),
         "data": msg_obj,
+    }
+
+
+@router.get("/messages/{message_id}")
+async def get_message(
+    message_id: str,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    for m in list(meta.get("messages") or []):
+        if m.get("_id") == message_id or m.get("id") == message_id:
+            norm = _normalize_message_record(m)
+            return {"status": "success", "message": norm, "data": norm}
+    raise HTTPException(status_code=404, detail="Message not found")
+
+
+@router.post("/messages/{message_id}/duplicate")
+async def duplicate_message(
+    message_id: str,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    church_messages: List[Dict[str, Any]] = list(meta.get("messages") or [])
+
+    source = None
+    for m in church_messages:
+        if m.get("_id") == message_id or m.get("id") == message_id:
+            source = m
+            break
+    if not source:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    norm_source = _normalize_message_record(source)
+    new_id = str(uuid.uuid4())
+    now_iso = _iso(_now())
+    duplicated = _normalize_message_record(
+        {
+            **norm_source,
+            "_id": new_id,
+            "id": new_id,
+            "title": f"{norm_source['title']} (Copy)",
+            "status": "Draft",
+            "scheduleType": "draft",
+            "deliveryRate": 0.0,
+            "sentDate": now_iso,
+            "sentAt": now_iso,
+            "createdAt": now_iso,
+        },
+        norm_source["recipients"],
+    )
+    church_messages.insert(0, duplicated)
+    meta["messages"] = church_messages
+    church.metadata_json = meta
+    flag_modified(church, "metadata_json")
+    await session.commit()
+
+    return {
+        "status": "success",
+        "success": True,
+        "message": "Message duplicated as draft",
+        "data": duplicated,
+    }
+
+
+@router.put("/messages/{message_id}")
+@router.patch("/messages/{message_id}")
+async def update_message(
+    message_id: str,
+    payload: MessagePayload,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+):
+    actor = await resolve_actor(session, current_user, church_id_from(request))
+    church = await _get_church(session, actor.church_id)
+    meta = dict(church.metadata_json or {})
+    church_messages: List[Dict[str, Any]] = list(meta.get("messages") or [])
+
+    idx = -1
+    for i, m in enumerate(church_messages):
+        if m.get("_id") == message_id or m.get("id") == message_id:
+            idx = i
+            break
+    if idx < 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    current = dict(church_messages[idx])
+    if payload.title is not None and payload.title.strip():
+        current["title"] = payload.title.strip()
+    if payload.content is not None:
+        current["content"] = payload.content
+    if payload.type is not None:
+        current["type"] = "Email" if payload.type.strip().lower() == "email" else "SMS"
+    if payload.scheduleType is not None:
+        current["scheduleType"] = payload.scheduleType
+    if payload.status is not None:
+        current["status"] = payload.status
+    elif payload.scheduleType is not None:
+        st = payload.scheduleType.lower()
+        current["status"] = "Draft" if st == "draft" else ("Scheduled" if st == "scheduled" else "Sent")
+    if current.get("status") == "Sent" and not current.get("deliveryRate"):
+        current["deliveryRate"] = 100.0
+        current["sentDate"] = _iso(_now())
+
+    updated = _normalize_message_record(current)
+    church_messages[idx] = updated
+    meta["messages"] = church_messages
+    church.metadata_json = meta
+    flag_modified(church, "metadata_json")
+    await session.commit()
+
+    return {
+        "status": "success",
+        "success": True,
+        "message": "Message updated successfully",
+        "data": updated,
     }
 
 
