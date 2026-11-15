@@ -5857,6 +5857,11 @@ async def get_admin_self_profile(
         else None
     )
     m = actor.member
+    member_roles = (
+        (await role_names_for_members(session, [m.id])).get(m.id, [])
+        if m
+        else [current_user.platform_role.value]
+    )
     meta = dict((church.metadata_json if church else None) or {})
     admin_profiles = dict(meta.get("admin_profiles") or {})
     prof_meta = dict(admin_profiles.get(str(current_user.id)) or {})
@@ -5882,8 +5887,8 @@ async def get_admin_self_profile(
         ),
         "position": (m.position if m and m.position else "Church Administrator"),
         "bio": str(prof_meta.get("bio") or ""),
-        "role": actor.roles[0] if actor.roles else "ADMIN",
-        "roles": list(actor.roles),
+        "role": member_roles[0] if member_roles else "ADMIN",
+        "roles": list(member_roles),
         "churchId": str(actor.church_id),
         "churchName": church.name if church else "",
         "branchId": str(branch.id) if branch else "",
