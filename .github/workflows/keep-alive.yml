@@ -1,0 +1,33 @@
+name: Keep Render Backend Alive
+
+on:
+  schedule:
+    # Ping every 12 minutes (Render free tier spins down after 15 minutes of inactivity)
+    - cron: '*/12 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping backend health endpoint
+        env:
+          HEALTH_URL: ${{ vars.BACKEND_HEALTH_URL || secrets.BACKEND_HEALTH_URL }}
+        run: |
+          if [ -z "$HEALTH_URL" ]; then
+            echo "BACKEND_HEALTH_URL is not set. Add it under Settings -> Secrets and variables -> Actions -> Variables (e.g. https://your-service.onrender.com/health)."
+            exit 0
+          fi
+
+          echo "Pinging $HEALTH_URL ..."
+          status_code=$(curl -sS -o /tmp/health_response.txt -w "%{http_code}" --max-time 60 --retry 2 --retry-delay 5 "$HEALTH_URL")
+          echo "HTTP status: $status_code"
+          cat /tmp/health_response.txt
+          echo ""
+
+          if [ "$status_code" -lt 200 ] || [ "$status_code" -ge 300 ]; then
+            echo "Health check failed with status $status_code"
+            exit 1
+          fi
