@@ -79,14 +79,14 @@ app.add_middleware(
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
 
-@app.get("/health")
-@limiter.exempt  # load balancers poll this; it must never be rate limited
+@app.api_route("/health", methods=["GET", "HEAD"])
+@limiter.exempt  # load balancers and uptime monitors poll this; it must never be rate limited
 async def health_check():
     """Liveness: the process is up."""
     return {"status": "ok"}
 
 
-@app.get("/health/ready")
+@app.api_route("/health/ready", methods=["GET", "HEAD"])
 @limiter.exempt
 async def readiness_check():
     """Readiness: the database answers."""
